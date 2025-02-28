@@ -1,0 +1,16 @@
+[package]
+name = "noisedeck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = { version = "0.2.29", default-features = false, features = ["std"] }
+clap = { version = "4.5.31", default-features = false, features = ["error-context", "help", "std", "suggestions", "usage", "cargo", "derive", "env", "unicode", "wrap_help"] }
+elgato-streamdeck = { version = "0.9.2", features = ["async"] }
+eyre = "0.6.12"
+imageproc = { version = "0.25.0", default-features = false }
+rodio = { version = "0.20.1", default-features = false, features = ["crossbeam-channel", "mp3", "tracing"] }
+stable-eyre = "0.2.2"
+tokio = { version = "1.43.0", default-features = false, features = ["rt", "rt-multi-thread", "io-std", "io-util", "time", "macros", "sync", "signal", "fs", "parking_lot"] }
+tracing = { version = "0.1.41", default-features = false, features = ["async-await", "attributes", "max_level_trace", "release_max_level_debug", "std"] }
+tracing-subscriber = { version = "0.3.19", default-features = false, features = ["std", "env-filter", "fmt", "registry"] }
