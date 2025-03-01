@@ -1,3 +1,4 @@
+use crate::daemon::ui::{ButtonBehavior, ButtonData, ButtonRef, Command};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
@@ -6,7 +7,6 @@ use eyre::{Context, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use tracing::{debug, error, info, instrument, warn};
-use crate::daemon::ui::{ButtonBehavior, ButtonData, ButtonRef, Command};
 
 mod ui;
 
@@ -34,11 +34,22 @@ pub async fn run() -> Result<(), eyre::Error> {
     device.clear_all_button_images().await?;
 
     let (mut deck, event_tx, mut command_rx) = ui::NoiseDeck::new(device.kind());
-    deck.push_page((0..kind.key_count()).map(|i| Some(ui::Button::builder()
-        .data(ButtonData { label: format!("Btn {i}").into() })
-        .on_tap(ButtonBehavior::Increment(i))
-        .build().into())
-    ).collect()).await?;
+    deck.push_page(
+        (0..kind.key_count())
+            .map(|i| {
+                Some(
+                    ui::Button::builder()
+                        .data(ButtonData {
+                            label: format!("Btn {i}").into(),
+                        })
+                        .on_tap(ButtonBehavior::Increment(i))
+                        .build()
+                        .into(),
+                )
+            })
+            .collect(),
+    )
+    .await?;
     let deck_finished = tokio::spawn(deck.run());
 
     let font_system = load_fonts().await?;
@@ -50,7 +61,7 @@ pub async fn run() -> Result<(), eyre::Error> {
         device,
         event_tx,
     };
-    
+
     let reader = state.device.get_reader();
     let sigint = tokio::signal::ctrl_c();
     tokio::pin!(sigint);
@@ -119,9 +130,9 @@ impl DeckState {
     fn shutdown(self) -> AsyncStreamDeck {
         self.device
     }
-    
+
     #[instrument(skip(self), level = "TRACE")]
-    async fn render_button_image(&mut self, button: &mut ButtonData)-> DynamicImage {
+    async fn render_button_image(&mut self, button: &mut ButtonData) -> DynamicImage {
         let mut image = RgbImage::from_pixel(71, 71, Rgb([0u8, 0u8, 0u8]));
         let metrics = Metrics::new(16.0, 24.0);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
@@ -155,7 +166,13 @@ impl DeckState {
     pub async fn handle_command(&mut self, command: Command) -> eyre::Result<()> {
         match command {
             Command::Refresh => {
-                for (i, button) in self.current_page()?.iter().take(u8::MAX as usize).enumerate().map(|(i, b)| (i, b.clone())) {
+                for (i, button) in self
+                    .current_page()?
+                    .iter()
+                    .take(u8::MAX as usize)
+                    .enumerate()
+                    .map(|(i, b)| (i, b.clone()))
+                {
                     let image = if let Some(r) = button.as_ref() {
                         let mut data = r.read().await;
                         self.render_button_image(&mut data).await.into()
@@ -183,20 +200,23 @@ impl DeckState {
     }
 
     fn current_page(&mut self) -> eyre::Result<Vec<Option<ButtonRef>>> {
-        self.page_stack.last().ok_or_eyre("Empty page stack").map(|p| p.clone())
+        self.page_stack
+            .last()
+            .ok_or_eyre("Empty page stack")
+            .map(|p| p.clone())
     }
-    
+
     fn button_by_key(&mut self, key: u8) -> eyre::Result<Option<ButtonRef>> {
-        Ok(self.page_stack.last().ok_or_eyre("Empty page stack")?
+        Ok(self
+            .page_stack
+            .last()
+            .ok_or_eyre("Empty page stack")?
             .get(key as usize)
             .and_then(|b| b.clone()))
     }
 
     #[tracing::instrument(level = "TRACE", skip_all)]
-    async fn handle_updates(
-        &mut self,
-        updates: Vec<DeviceStateUpdate>,
-    ) -> Result<(), Report> {
+    async fn handle_updates(&mut self, updates: Vec<DeviceStateUpdate>) -> Result<(), Report> {
         for update in updates {
             match update {
                 DeviceStateUpdate::ButtonDown(key) => {
@@ -207,7 +227,11 @@ impl DeckState {
                     if let Some(button) = self.button_by_key(key)? {
                         self.event_tx.send(ui::Event::ButtonTap(button)).await?;
                     } else {
-                        warn!("Button {} not found at page stack depth {}", key, self.page_stack.len());
+                        warn!(
+                            "Button {} not found at page stack depth {}",
+                            key,
+                            self.page_stack.len()
+                        );
                     }
                 }
                 unknown => {
@@ -218,8 +242,6 @@ impl DeckState {
         Ok(())
     }
 }
-
-
 
 #[tracing::instrument(level = tracing::Level::DEBUG)]
 async fn load_fonts() -> eyre::Result<FontSystem> {

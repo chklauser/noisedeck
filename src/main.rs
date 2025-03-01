@@ -5,12 +5,12 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[command(version, about, author)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>
+    command: Option<Commands>,
 }
 
-#[derive(Debug,Eq,PartialEq,Subcommand,Clone)]
+#[derive(Debug, Eq, PartialEq, Subcommand, Clone)]
 enum Commands {
-    Daemon
+    Daemon,
 }
 
 #[tokio::main]
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         Some(Commands::Daemon) => {
             daemon::run().await?;
-        },
+        }
         None => {
             return Ok(());
         }
@@ -37,4 +37,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod daemon;
-

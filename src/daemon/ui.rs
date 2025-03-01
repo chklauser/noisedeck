@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 #[derive(Default)]
 pub struct Button {
     data: tokio::sync::RwLock<ButtonData>,
-    on_tap:  Option<ButtonBehavior>,
+    on_tap: Option<ButtonBehavior>,
 }
 impl Button {
     pub(crate) fn builder() -> ButtonBuilder {
@@ -32,7 +32,7 @@ impl ButtonBehavior {
         }
         Ok(())
     }
-    
+
     fn increment(i: u8, deck: &mut NoiseDeck, data: &mut ButtonData) -> eyre::Result<()> {
         let state = &mut deck.state[i as usize];
         *state += 1;
@@ -42,17 +42,16 @@ impl ButtonBehavior {
 }
 
 impl ButtonBuilder {
-    pub fn on_tap(mut self, behavior: ButtonBehavior) -> Self
-    {
+    pub fn on_tap(mut self, behavior: ButtonBehavior) -> Self {
         self.inner.on_tap = Some(behavior);
         self
     }
-    
+
     pub fn data(mut self, data: ButtonData) -> Self {
         *self.inner.data.get_mut() = data;
         self
     }
-    
+
     pub fn build(self) -> Button {
         self.inner
     }
