@@ -1,5 +1,7 @@
+use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use elgato_streamdeck::info::Kind;
 use std::iter::repeat;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
@@ -7,6 +9,7 @@ use tracing::{debug, info, warn};
 #[derive(Default)]
 pub struct Button {
     data: tokio::sync::RwLock<ButtonData>,
+    pub track: Option<Arc<Track>>,
     on_tap: Option<ButtonBehavior>,
 }
 impl Button {
@@ -22,12 +25,21 @@ pub struct ButtonBuilder {
 
 pub enum ButtonBehavior {
     Increment(u8),
+    Play,
 }
+
 impl ButtonBehavior {
-    pub async fn invoke(&self, deck: &mut NoiseDeck, data: &mut ButtonData) -> eyre::Result<()> {
+    pub async fn invoke(&self, deck: &mut NoiseDeck, button: &Button, data: &mut ButtonData) -> eyre::Result<()> {
         match self {
             ButtonBehavior::Increment(i) => {
                 ButtonBehavior::increment(*i, deck, data)?;
+            }
+            ButtonBehavior::Play => {
+                if let Some(track) = &button.track {
+                    ButtonBehavior::play(deck, track).await?;
+                } else {
+                    warn!("Button has no track assigned");
+                }
             }
         }
         Ok(())
@@ -37,6 +49,11 @@ impl ButtonBehavior {
         let state = &mut deck.state[i as usize];
         *state += 1;
         data.label = format!("Btn {i}\n{state}").into();
+        Ok(())
+    }
+    
+    async fn play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
+        deck.audio_command_tx.send(AudioCommand::Play(track.clone())).await?;
         Ok(())
     }
 }
@@ -49,6 +66,11 @@ impl ButtonBuilder {
 
     pub fn data(mut self, data: ButtonData) -> Self {
         *self.inner.data.get_mut() = data;
+        self
+    }
+    
+    pub fn track(mut self, track_path: PathBuf) -> Self {
+        self.inner.track = Some(Arc::new(Track::new(track_path)));
         self
     }
 
@@ -100,38 +122,44 @@ impl PartialEq for ButtonRef {
 impl Eq for ButtonRef {}
 
 pub struct NoiseDeck {
-    command_tx: Sender<Command>,
-    event_rx: Receiver<Event>,
+    ui_command_tx: Sender<UiCommand>,
+    ui_event_rx: Receiver<UiEvent>,
+    audio_command_tx: Sender<AudioCommand>,
+    audio_event_rx: Receiver<AudioEvent>,
 
     pub state: Vec<u16>,
 }
 
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
-        self.command_tx.send(Command::PushPage(buttons)).await?;
+        self.ui_command_tx.send(UiCommand::PushPage(buttons)).await?;
         Ok(())
     }
 }
 
 impl NoiseDeck {
-    pub fn new(kind: Kind) -> (Self, Sender<Event>, Receiver<Command>) {
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
+    pub fn new(kind: Kind) -> (Self, Sender<UiEvent>, Receiver<UiCommand>, Sender<AudioEvent>, Receiver<AudioCommand>) {
+        let (audio_event_tx, audio_event_rx) = tokio::sync::mpsc::channel(16);
+        let (audio_command_tx, audio_command_rx) = tokio::sync::mpsc::channel(16);
+        let (ui_event_tx, ui_event_rx) = tokio::sync::mpsc::channel(16);
+        let (ui_command_tx, ui_command_rx) = tokio::sync::mpsc::channel(16);
         let deck = NoiseDeck {
-            command_tx,
-            event_rx,
+            ui_command_tx,
+            ui_event_rx,
+            audio_command_tx,
+            audio_event_rx,
             state: repeat(0).take(kind.key_count() as usize).collect(),
         };
-        (deck, event_tx, command_rx)
+        (deck, ui_event_tx, ui_command_rx, audio_event_tx, audio_command_rx)
     }
 
     #[tracing::instrument(skip_all)]
     pub async fn run(mut self) -> eyre::Result<()> {
         loop {
             tokio::select! {
-                event = self.event_rx.recv() => {
+                event = self.ui_event_rx.recv() => {
                     match event {
-                        Some(Event::ButtonTap(button)) => {
+                        Some(UiEvent::ButtonTap(button)) => {
                             if let Err(e) = self.handle_button_tap(&button).await {
                                 warn!(error = %e, "Error handling button tap event");
                             }
@@ -152,9 +180,9 @@ impl NoiseDeck {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
             {
                 let mut button_guard = button.inner.data.write().await;
-                on_tap.invoke(self, &mut button_guard).await?;
+                on_tap.invoke(self, &button.inner, &mut button_guard).await?;
             }
-            self.command_tx.send(Command::Refresh).await?;
+            self.ui_command_tx.send(UiCommand::Refresh).await?;
         } else {
             debug!("Button tap event received, but no handler set");
         }
@@ -163,22 +191,22 @@ impl NoiseDeck {
 }
 
 #[derive(Debug)]
-pub enum Event {
+pub enum UiEvent {
     ButtonTap(ButtonRef),
 }
 
-pub enum Command {
+pub enum UiCommand {
     Refresh,
     PushPage(Vec<Option<ButtonRef>>),
     PopPage,
 }
 
-impl std::fmt::Debug for Command {
+impl std::fmt::Debug for UiCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::Refresh => f.write_str("Refresh"),
-            Command::PushPage(_) => f.write_str("PushPage"),
-            Command::PopPage => f.write_str("PopPage"),
+            UiCommand::Refresh => f.write_str("Refresh"),
+            UiCommand::PushPage(_) => f.write_str("PushPage"),
+            UiCommand::PopPage => f.write_str("PopPage"),
         }
     }
 }

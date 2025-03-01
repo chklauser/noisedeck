@@ -1,4 +1,4 @@
-use crate::daemon::ui::{ButtonBehavior, ButtonData, ButtonRef, Command};
+use crate::daemon::ui::{Button, ButtonBehavior, ButtonData, ButtonRef, UiCommand};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
@@ -9,6 +9,7 @@ use imageproc::image::RgbImage;
 use tracing::{debug, error, info, instrument, warn};
 
 mod ui;
+mod audio;
 
 #[tracing::instrument]
 pub async fn run() -> Result<(), eyre::Error> {
@@ -33,24 +34,39 @@ pub async fn run() -> Result<(), eyre::Error> {
     device.set_brightness(60).await?;
     device.clear_all_button_images().await?;
 
-    let (mut deck, event_tx, mut command_rx) = ui::NoiseDeck::new(device.kind());
+    let (mut deck, ui_event_tx, mut ui_command_rx, audio_event_tx, audio_command_rx) = ui::NoiseDeck::new(device.kind());
     deck.push_page(
         (0..kind.key_count())
             .map(|i| {
                 Some(
-                    ui::Button::builder()
-                        .data(ButtonData {
-                            label: format!("Btn {i}").into(),
-                        })
-                        .on_tap(ButtonBehavior::Increment(i))
-                        .build()
-                        .into(),
+                    if i == 11 {
+                        Button::builder()
+                            .data(ButtonData {
+                                label: "Play".to_string().into(),
+                            })
+                            .on_tap(ButtonBehavior::Play)
+                            .track("sample-audio/forest-ambience-296528.mp3".into())
+                            .build().into()
+                    } else {
+                        Button::builder()
+                            .data(ButtonData {
+                                label: format!("Btn {i}").into(),
+                            })
+                            .on_tap(ButtonBehavior::Increment(i))
+                            .build()
+                            .into()
+                    },
                 )
             })
             .collect(),
     )
     .await?;
     let deck_finished = tokio::spawn(deck.run());
+    let audio_player_finished = tokio::task::spawn_blocking(|| {
+        if let Err(e) = audio::run(audio_event_tx, audio_command_rx) {
+            error!(error = %e, "Error running audio player");
+        }
+    });
 
     let font_system = load_fonts().await?;
     let swash_cache = SwashCache::new();
@@ -59,7 +75,7 @@ pub async fn run() -> Result<(), eyre::Error> {
         font_system,
         swash_cache,
         device,
-        event_tx,
+        event_tx: ui_event_tx,
     };
 
     let reader = state.device.get_reader();
@@ -78,7 +94,7 @@ pub async fn run() -> Result<(), eyre::Error> {
                     }
                 }
             },
-            command = command_rx.recv() => {
+            command = ui_command_rx.recv() => {
                 if let Some(command) = command {
                     match state.handle_command(command).await {
                         Ok(_) => {}
@@ -108,6 +124,7 @@ pub async fn run() -> Result<(), eyre::Error> {
     drop(reader);
     let device = state.shutdown();
     deck_finished.await??;
+    audio_player_finished.await?;
 
     if device.shutdown().await.is_err() {
         if device.sleep().await.is_err() {
@@ -123,7 +140,7 @@ struct DeckState {
     font_system: FontSystem,
     swash_cache: SwashCache,
     device: AsyncStreamDeck,
-    event_tx: tokio::sync::mpsc::Sender<ui::Event>,
+    event_tx: tokio::sync::mpsc::Sender<ui::UiEvent>,
 }
 
 impl DeckState {
@@ -163,9 +180,9 @@ impl DeckState {
     }
 
     #[instrument(skip(self), level = "TRACE")]
-    pub async fn handle_command(&mut self, command: Command) -> eyre::Result<()> {
+    pub async fn handle_command(&mut self, command: UiCommand) -> eyre::Result<()> {
         match command {
-            Command::Refresh => {
+            UiCommand::Refresh => {
                 for (i, button) in self
                     .current_page()?
                     .iter()
@@ -184,11 +201,11 @@ impl DeckState {
                 }
                 self.device.flush().await?;
             }
-            Command::PushPage(new_page) => {
+            UiCommand::PushPage(new_page) => {
                 self.page_stack.push(new_page);
-                Box::pin(self.handle_command(Command::Refresh)).await?;
+                Box::pin(self.handle_command(UiCommand::Refresh)).await?;
             }
-            Command::PopPage => {
+            UiCommand::PopPage => {
                 if self.page_stack.len() > 1 {
                     self.page_stack.pop();
                 } else {
@@ -225,7 +242,7 @@ impl DeckState {
                 DeviceStateUpdate::ButtonUp(key) => {
                     info!("Button {} up", key);
                     if let Some(button) = self.button_by_key(key)? {
-                        self.event_tx.send(ui::Event::ButtonTap(button)).await?;
+                        self.event_tx.send(ui::UiEvent::ButtonTap(button)).await?;
                     } else {
                         warn!(
                             "Button {} not found at page stack depth {}",
