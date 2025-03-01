@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Debug, Parser)]
 #[command(version, about, author)]
@@ -14,7 +15,10 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .init();
     stable_eyre::install()?;
 
     let cli = Cli::parse();
@@ -40,7 +44,7 @@ mod daemon {
     use eyre::{Context, OptionExt};
     use image::{ImageBuffer, Rgb};
     use imageproc::image::RgbImage;
-    use tracing::{info, warn};
+    use tracing::{debug, info, warn};
 
     #[tracing::instrument]
     pub async fn run() -> Result<(), eyre::Error> {
@@ -50,7 +54,7 @@ mod daemon {
         let (kind, serial) = devices.iter().filter(|(kind,_)| *kind == Kind::Original || *kind == Kind::OriginalV2).next().ok_or_eyre("No supported StreamDeck found")?;
 
         let device = AsyncStreamDeck::connect(&hid, *kind, serial).with_context(|| format!("Failed to connect to device {:?} {}", kind, &serial))?;
-        info!("Connected to '{}' with version '{}'. Key count {}", device.serial_number().await?, device.firmware_version().await?, kind.key_count());
+        debug!("Connected to '{}' with version '{}'. Key count {}", device.serial_number().await?, device.firmware_version().await?, kind.key_count());
 
         device.set_brightness(60).await?;
         device.clear_all_button_images().await?;
@@ -64,10 +68,13 @@ mod daemon {
             device.set_button_image(i, image.into()).await?;
         }
         device.flush().await?;
+        
+        
 
         Ok(())
     }
 
+    #[tracing::instrument(level = "TRACE", skip(font_system, swash_cache))]
     fn render_button_image(mut font_system: &mut FontSystem, mut swash_cache: &mut SwashCache, text: &str) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
         let mut image = RgbImage::from_pixel(71, 71, Rgb([0u8, 0u8, 0u8]));
         let metrics = Metrics::new(16.0, 24.0);
@@ -94,7 +101,7 @@ mod daemon {
         image
     }
 
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = tracing::Level::DEBUG)]
     async fn load_fonts() -> eyre::Result<FontSystem> {
         let emoji_font_data = Vec::from(include_bytes!("../font/noto-color-emoji/NotoColorEmoji-NoSvg.ttf"));
         let sans_font_data = Vec::from(include_bytes!("../font/noto-sans/static/NotoSans-Medium.ttf"));
