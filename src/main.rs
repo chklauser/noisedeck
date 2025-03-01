@@ -72,18 +72,43 @@ mod daemon {
 
         let mut state = repeat(0u16).take(device.kind().key_count() as usize).collect::<Vec<_>>();
         let reader = device.get_reader();
-        'infinite: loop {
-            let updates = reader.read(100.0).await.context("Failed to read updates")?;
+        let sigint = tokio::signal::ctrl_c();
+        tokio::pin!(sigint);
 
-            match handle_updates(&device, &mut font_system, &mut swash_cache, &mut state, updates).await {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(error = %e, "Error handling updates");
-                    break 'infinite;
+        'infinite: loop {
+            tokio::select! {
+                updates_result = reader.read(100.0) => {
+                    let updates = updates_result.context("Failed to read updates")?;
+                    match handle_updates(&device, &mut font_system, &mut swash_cache, &mut state, updates).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "Error handling updates");
+                            break 'infinite;
+                        }
+                    }
+                }
+                sigint_result = &mut sigint => {
+                    match sigint_result {
+                        Ok(_) => {
+                            info!("Received SIGINT, shutting down gracefully");
+                            break 'infinite;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Error waiting for SIGINT");
+                            break 'infinite;
+                        }
+                    }
                 }
             }
         }
         drop(reader);
+
+        if  device.shutdown().await.is_err() {
+            if device.sleep().await.is_err() {
+                device.set_brightness(15).await?;
+            }
+        }
+
 
         Ok(())
     }
