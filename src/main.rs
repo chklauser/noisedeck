@@ -37,11 +37,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod daemon {
+    use std::iter::repeat;
     use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
     use elgato_streamdeck::asynchronous::list_devices_async;
     use elgato_streamdeck::info::Kind;
-    use elgato_streamdeck::{new_hidapi, AsyncStreamDeck};
-    use eyre::{Context, OptionExt};
+    use elgato_streamdeck::{new_hidapi, AsyncStreamDeck, DeviceStateUpdate};
+    use eyre::{Context, OptionExt, Report};
     use image::{ImageBuffer, Rgb};
     use imageproc::image::RgbImage;
     use tracing::{debug, info, warn};
@@ -61,16 +62,58 @@ mod daemon {
 
         let mut font_system = load_fonts().await?;
         let mut swash_cache = SwashCache::new();
-        
+
         for i in 0..kind.key_count() {
             let text = format!("Btn {i}");
             let image = render_button_image(&mut font_system, &mut swash_cache, &text);
             device.set_button_image(i, image.into()).await?;
         }
         device.flush().await?;
-        
-        
 
+        let mut state = repeat(0u16).take(device.kind().key_count() as usize).collect::<Vec<_>>();
+        let reader = device.get_reader();
+        'infinite: loop {
+            let updates = reader.read(100.0).await.context("Failed to read updates")?;
+
+            match handle_updates(&device, &mut font_system, &mut swash_cache, &mut state, updates).await {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(error = %e, "Error handling updates");
+                    break 'infinite;
+                }
+            }
+        }
+        drop(reader);
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "TRACE", skip_all)]
+    async fn handle_updates(device: &AsyncStreamDeck, mut font_system: &mut FontSystem, mut swash_cache: &mut SwashCache, state: &mut Vec<u16>, updates: Vec<DeviceStateUpdate>) -> Result<(), Report> {
+        let mut overall_flush_needed = false;
+        for update in updates {
+            overall_flush_needed |= match update {
+                DeviceStateUpdate::ButtonDown(key) => {
+                    info!("Button {} down", key);
+                    false
+                },
+                DeviceStateUpdate::ButtonUp(key) => {
+                    info!("Button {} up", key);
+                    state[key as usize] += 1;
+                    device.set_button_image(key, render_button_image(&mut font_system, &mut swash_cache,
+                        &format!("Btn {}\n{}", key, state[key as usize])).into()).await?;
+                    true
+                },
+                unknown => {
+                    info!("Ignoring device update: {:?}", unknown);
+                    false
+                }
+            };
+        }
+
+        if overall_flush_needed {
+            device.flush().await?;
+        }
         Ok(())
     }
 
