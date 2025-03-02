@@ -11,7 +11,13 @@ eyre = "0.6.12"
 image = { version = "0.25.5", default-features = false, features = ["bmp", "jpeg", "png"] }
 imageproc = { version = "0.25.0", default-features = false }
 rodio = { version = "0.20.1", default-features = false, features = ["crossbeam-channel", "mp3", "tracing"] }
+serde_json = "1.0.139"
 stable-eyre = "0.2.2"
 tokio = { version = "1.43.0", default-features = false, features = ["rt", "rt-multi-thread", "io-std", "io-util", "time", "macros", "sync", "signal", "fs", "parking_lot"] }
 tracing = { version = "0.1.41", default-features = false, features = ["async-await", "attributes", "max_level_trace", "release_max_level_debug", "std"] }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["std", "env-filter", "fmt", "registry"] }
+serde = { version = "1.0.218", features = ["derive", "rc"] }
+zip = { version = "2.2.3", default-features = false, features = ["deflate"] }
+regex = "1.11.1"
+base32 = "0.5.1"
+uuid = { version = "1.15.1", features = ["serde"] }
