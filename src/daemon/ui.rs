@@ -1,10 +1,14 @@
+use crate::config;
+use crate::config::Config;
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use elgato_streamdeck::info::Kind;
+use eyre::OptionExt;
 use std::iter::repeat;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 #[derive(Default)]
 pub struct Button {
@@ -18,21 +22,34 @@ impl Button {
             inner: Button::default(),
         }
     }
+
+    pub fn none() -> ButtonRef {
+        static NONE: LazyLock<ButtonRef> = LazyLock::new(|| Button::builder().build().into());
+        NONE.clone()
+    }
 }
 pub struct ButtonBuilder {
     inner: Button,
 }
 
 pub enum ButtonBehavior {
-    Increment(u8),
+    Push(Uuid),
     Play,
+    Pop,
 }
-
 impl ButtonBehavior {
-    pub async fn invoke(&self, deck: &mut NoiseDeck, button: &Button, data: &mut ButtonData) -> eyre::Result<()> {
+    pub async fn invoke(
+        &self,
+        deck: &mut NoiseDeck,
+        button: &Button,
+        _data: &mut ButtonData,
+    ) -> eyre::Result<()> {
         match self {
-            ButtonBehavior::Increment(i) => {
-                ButtonBehavior::increment(*i, deck, data)?;
+            ButtonBehavior::Pop => {
+                ButtonBehavior::pop(deck).await?;
+            }
+            ButtonBehavior::Push(id) => {
+                ButtonBehavior::push(deck, id.clone()).await?;
             }
             ButtonBehavior::Play => {
                 if let Some(track) = &button.track {
@@ -45,15 +62,21 @@ impl ButtonBehavior {
         Ok(())
     }
 
-    fn increment(i: u8, deck: &mut NoiseDeck, data: &mut ButtonData) -> eyre::Result<()> {
-        let state = &mut deck.state[i as usize];
-        *state += 1;
-        data.label = format!("Btn {i}\n{state}").into();
+    async fn pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
+        deck.ui_command_tx.send(UiCommand::PopPage).await?;
         Ok(())
     }
-    
+
+    async fn push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
+        let buttons = deck.render_page(&id)?;
+        deck.push_page(buttons).await?;
+        Ok(())
+    }
+
     async fn play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
-        deck.audio_command_tx.send(AudioCommand::Play(track.clone())).await?;
+        deck.audio_command_tx
+            .send(AudioCommand::Play(track.clone()))
+            .await?;
         Ok(())
     }
 }
@@ -68,8 +91,8 @@ impl ButtonBuilder {
         *self.inner.data.get_mut() = data;
         self
     }
-    
-    pub fn track(mut self, track_path: PathBuf) -> Self {
+
+    pub fn track(mut self, track_path: Arc<PathBuf>) -> Self {
         self.inner.track = Some(Arc::new(Track::new(track_path)));
         self
     }
@@ -127,18 +150,28 @@ pub struct NoiseDeck {
     audio_command_tx: Sender<AudioCommand>,
     audio_event_rx: Receiver<AudioEvent>,
 
-    pub state: Vec<u16>,
+    kind: Kind,
+    config: Arc<Config>,
 }
 
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
-        self.ui_command_tx.send(UiCommand::PushPage(buttons)).await?;
+        self.ui_command_tx
+            .send(UiCommand::PushPage(buttons))
+            .await?;
         Ok(())
     }
-}
 
-impl NoiseDeck {
-    pub fn new(kind: Kind) -> (Self, Sender<UiEvent>, Receiver<UiCommand>, Sender<AudioEvent>, Receiver<AudioCommand>) {
+    pub fn new(
+        kind: Kind,
+        config: Arc<Config>,
+    ) -> (
+        Self,
+        Sender<UiEvent>,
+        Receiver<UiCommand>,
+        Sender<AudioEvent>,
+        Receiver<AudioCommand>,
+    ) {
         let (audio_event_tx, audio_event_rx) = tokio::sync::mpsc::channel(16);
         let (audio_command_tx, audio_command_rx) = tokio::sync::mpsc::channel(16);
         let (ui_event_tx, ui_event_rx) = tokio::sync::mpsc::channel(16);
@@ -148,9 +181,73 @@ impl NoiseDeck {
             ui_event_rx,
             audio_command_tx,
             audio_event_rx,
-            state: repeat(0).take(kind.key_count() as usize).collect(),
+            kind,
+            config,
         };
-        (deck, ui_event_tx, ui_command_rx, audio_event_tx, audio_command_rx)
+        (
+            deck,
+            ui_event_tx,
+            ui_command_rx,
+            audio_event_tx,
+            audio_command_rx,
+        )
+    }
+
+    pub async fn init(&mut self) -> eyre::Result<()> {
+        let rendered_buttons = self.render_page(&self.config.start_page.clone())?;
+        self.push_page(rendered_buttons).await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn render_page(&mut self, page_id: &Uuid) -> eyre::Result<Vec<Option<ButtonRef>>> {
+        let page = self
+            .config
+            .pages
+            .get(&page_id)
+            .ok_or_eyre("Start page not found")?;
+
+        let max_configured_buttons = self.kind.key_count() as usize - 1;
+        let padding_btn_cnt = max_configured_buttons - page.buttons.len().min(max_configured_buttons);
+        debug!("Padding buttons: {}", padding_btn_cnt);
+        let rendered_buttons = page
+            .buttons
+            .iter()
+            .take(max_configured_buttons)
+            .map(|b| {
+                Some(match &b.behavior {
+                    config::ButtonBehavior::PushPage(id) => Button::builder()
+                        .data(ButtonData {
+                            label: b.label.clone(),
+                        })
+                        .on_tap(ButtonBehavior::Push(id.clone()))
+                        .build()
+                        .into(),
+                    config::ButtonBehavior::PlaySound { path } => Button::builder()
+                        .data(ButtonData {
+                            label: b.label.clone(),
+                        })
+                        .on_tap(ButtonBehavior::Play)
+                        .track(Arc::new(PathBuf::from(&path[..])))
+                        .build()
+                        .into(),
+                })
+            })
+            .chain([Some(
+                Button::builder()
+                    .data(ButtonData {
+                        label: "Back".to_string().into(),
+                    })
+                    .on_tap(ButtonBehavior::Pop)
+                    .build()
+                    .into(),
+            )])
+            .chain(
+                repeat(Some(Button::none()))
+                    .take(padding_btn_cnt),
+            )
+            .collect();
+        Ok(rendered_buttons)
     }
 
     #[tracing::instrument(skip_all)]
@@ -180,7 +277,9 @@ impl NoiseDeck {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
             {
                 let mut button_guard = button.inner.data.write().await;
-                on_tap.invoke(self, &button.inner, &mut button_guard).await?;
+                on_tap
+                    .invoke(self, &button.inner, &mut button_guard)
+                    .await?;
             }
             self.ui_command_tx.send(UiCommand::Refresh).await?;
         } else {

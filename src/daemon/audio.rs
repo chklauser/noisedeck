@@ -9,12 +9,12 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, instrument};
 
 pub struct Track {
-    pub path: PathBuf,
+    pub path: Arc<PathBuf>,
     state: RwLock<TrackState>,
 }
 
 impl Track {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: Arc<PathBuf>) -> Self {
         Track {
             path,
             state: RwLock::default(),
@@ -56,7 +56,7 @@ impl AudioState {
         let sink = Sink::try_new(&self.stream_handle).context("Unable to create audio sink")?;
         let mut track_state_guard = track.state.blocking_write();
         
-        let file = BufReader::new(File::open(&track.path)
+        let file = BufReader::new(File::open(&*track.path)
             .with_context(|| format!("Unable to open {:?}", &track.path))?);
         let source = Decoder::new_mp3(file)
             .with_context(|| format!("Unable to decode {:?}", &track.path))?;

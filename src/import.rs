@@ -7,26 +7,28 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use tracing::{debug, info, trace};
+use std::sync::{Arc, LazyLock, OnceLock};
+use tracing::{debug, info};
 use uuid::Uuid;
 use zip::ZipArchive;
 use crate::config;
+use crate::config::Config;
 
 #[derive(Debug, Eq, PartialEq, Args, Clone)]
 pub struct ImportArgs {
-    path: PathBuf,
+    pub path: PathBuf,
     #[arg(long, required = true)]
-    profile_name: String,
+    pub profile_name: String,
 }
 
 #[tracing::instrument(skip(args))]
 pub(crate) async fn run(args: &ImportArgs) -> eyre::Result<()> {
     let args = args.clone();
-    tokio::task::spawn_blocking(move || run_sync(args)).await?
+    _ = tokio::task::spawn_blocking(move || run_sync(args)).await?;
+    Ok(())
 }
 
-fn run_sync(args: ImportArgs) -> eyre::Result<()> {
+pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
     info!("Running imports with args: {:#?}", args);
     let file = File::open(&args.path)
         .with_context(|| format!("Failed to import file {:?}", &args.path))?;
@@ -116,18 +118,19 @@ fn run_sync(args: ImportArgs) -> eyre::Result<()> {
         });
     }
     
-    info!("Generated config: {:#?}", config::Config{
+    let c = config::Config{
         pages: config_pages,
-        start_page: selected_profile.default,
-    });
+        start_page: selected_profile.current,
+    };
 
-    Ok(())
+    Ok(c)
 }
 
-fn label_of(action: &Action) -> String {
+fn label_of(action: &Action) -> Arc<String> {
+    static EMPTY_STRING: LazyLock<Arc<String>> = LazyLock::new(|| Arc::new("".to_string()));
     action.states.get(action.state)
         .and_then(|x| x.title.clone())
-        .unwrap_or_else(|| "".to_string())
+        .unwrap_or_else(|| EMPTY_STRING.clone())
 }
 
 struct PageEntry {

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use serde::{Deserialize, Deserializer};
 use uuid::Uuid;
 
@@ -76,7 +77,7 @@ pub struct OpenChildSettings {
 pub struct AudioSettings {
     pub fade_length: Option<u32>,
     pub volume: u8,
-    pub path: String,
+    pub path: Arc<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -84,7 +85,7 @@ pub struct AudioSettings {
 pub struct State{
     #[serde(default)]
     pub show_title: bool,
-    pub title: Option<String>,
+    pub title: Option<Arc<String>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Hash)]

@@ -1,4 +1,5 @@
-use crate::daemon::ui::{Button, ButtonBehavior, ButtonData, ButtonRef, UiCommand};
+use crate::daemon::ui::{ButtonData, ButtonRef, UiCommand};
+use crate::import::ImportArgs;
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
@@ -6,10 +7,12 @@ use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};
 use eyre::{Context, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
+use std::env;
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 
-mod ui;
 mod audio;
+mod ui;
 
 #[tracing::instrument]
 pub async fn run() -> Result<(), eyre::Error> {
@@ -34,33 +37,19 @@ pub async fn run() -> Result<(), eyre::Error> {
     device.set_brightness(60).await?;
     device.clear_all_button_images().await?;
 
-    let (mut deck, ui_event_tx, mut ui_command_rx, audio_event_tx, audio_command_rx) = ui::NoiseDeck::new(device.kind());
-    deck.push_page(
-        (0..kind.key_count())
-            .map(|i| {
-                Some(
-                    if i == 11 {
-                        Button::builder()
-                            .data(ButtonData {
-                                label: "Play".to_string().into(),
-                            })
-                            .on_tap(ButtonBehavior::Play)
-                            .track("sample-audio/forest-ambience-296528.mp3".into())
-                            .build().into()
-                    } else {
-                        Button::builder()
-                            .data(ButtonData {
-                                label: format!("Btn {i}").into(),
-                            })
-                            .on_tap(ButtonBehavior::Increment(i))
-                            .build()
-                            .into()
-                    },
-                )
+    let config = Arc::new(
+        tokio::task::spawn_blocking(|| {
+            crate::import::run_sync(ImportArgs {
+                path: env::var("import_path")?.into(),
+                profile_name: env::var("profile_name")?.into(),
             })
-            .collect(),
-    )
-    .await?;
+        })
+        .await??,
+    );
+
+    let (mut deck, ui_event_tx, mut ui_command_rx, audio_event_tx, audio_command_rx) =
+        ui::NoiseDeck::new(device.kind(), config.clone());
+    deck.init().await?;
     let deck_finished = tokio::spawn(deck.run());
     let audio_player_finished = tokio::task::spawn_blocking(|| {
         if let Err(e) = audio::run(audio_event_tx, audio_command_rx) {
@@ -71,7 +60,7 @@ pub async fn run() -> Result<(), eyre::Error> {
     let font_system = load_fonts().await?;
     let swash_cache = SwashCache::new();
     let mut state = DeckState {
-        page_stack: vec![vec![]],
+        page_stack: vec![],
         font_system,
         swash_cache,
         device,

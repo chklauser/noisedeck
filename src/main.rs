@@ -47,6 +47,7 @@ mod import;
 
 mod config {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
@@ -64,7 +65,7 @@ mod config {
     
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Button {
-        pub label: String,
+        pub label: Arc<String>,
         pub behavior: ButtonBehavior,
     }
     
@@ -72,7 +73,7 @@ mod config {
     pub enum ButtonBehavior {
         PushPage(Uuid),
         PlaySound {
-            path: String,
+            path: Arc<String>,
         }
     }
 }
