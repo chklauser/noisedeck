@@ -27,9 +27,15 @@ async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
     Ok(())
 }
 
-async fn btn_play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
+async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
+    let state = track.read().await;
+    let track = track.clone();
     deck.audio_command_tx
-        .send(AudioCommand::Play(track.clone()))
+        .send(if state.is_playing {
+            AudioCommand::Stop(track)
+        } else {
+            AudioCommand::Play(track)
+        })
         .await?;
     Ok(())
 }
@@ -37,6 +43,7 @@ async fn btn_play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ButtonData {
     pub label: Arc<String>,
+    pub notification: Option<String>
 }
 
 pub struct NoiseDeck {
@@ -48,6 +55,7 @@ pub struct NoiseDeck {
     kind: Kind,
     config: Arc<Config>,
     library: HashMap<Uuid, LibraryCategoryState>,
+    tracks: HashMap<Arc<PathBuf>, ButtonRef>
 }
 
 struct LibraryCategoryState {
@@ -86,6 +94,7 @@ impl NoiseDeck {
             kind,
             config,
             library: HashMap::new(),
+            tracks: HashMap::new(),
         };
         (
             deck,
@@ -104,7 +113,10 @@ impl NoiseDeck {
 
     #[tracing::instrument(skip(self), level = "debug")]
     fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<Vec<Option<ButtonRef>>> {
-        fn layout_library_category(page: &config::Page, kind: &Kind) -> eyre::Result<Vec<ButtonRef>> {
+        fn layout_library_category(
+            page: &config::Page,
+            kind: &Kind,
+        ) -> eyre::Result<Vec<ButtonRef>> {
             let max_configured_buttons = kind.key_count() as usize - 1;
             let padding_btn_cnt =
                 max_configured_buttons - page.buttons.len().min(max_configured_buttons);
@@ -117,6 +129,7 @@ impl NoiseDeck {
                     config::ButtonBehavior::PushPage(id) => Button::builder()
                         .data(ButtonData {
                             label: b.label.clone(),
+                            ..Default::default()
                         })
                         .on_tap(ButtonBehavior::Push(id.clone()))
                         .build()
@@ -124,8 +137,9 @@ impl NoiseDeck {
                     config::ButtonBehavior::PlaySound { path } => Button::builder()
                         .data(ButtonData {
                             label: b.label.clone(),
+                            ..Default::default()
                         })
-                        .on_tap(ButtonBehavior::Play)
+                        .on_tap(ButtonBehavior::PlayStop)
                         .track(Arc::new(PathBuf::from(&path[..])))
                         .build()
                         .into(),
@@ -133,6 +147,7 @@ impl NoiseDeck {
                 .chain([Button::builder()
                     .data(ButtonData {
                         label: "Back".to_string().into(),
+                        ..Default::default()
                     })
                     .on_tap(ButtonBehavior::Pop)
                     .build()
@@ -151,9 +166,13 @@ impl NoiseDeck {
                     .get(&page_id)
                     .expect("page not found")
                     .clone();
+                let buttons = layout_library_category(&page, &self.kind)?;
+                self.tracks.extend(buttons.iter().filter_map(|b|
+                    b.inner.track.as_ref().map(|t| (t.path.clone(), b.clone()))
+                ));
                 let initial_state = LibraryCategoryState {
                     id: page_id.clone(),
-                    buttons: layout_library_category(&page, &self.kind)?,
+                    buttons,
                     config: page,
                 };
                 &*e.insert(initial_state)
@@ -179,12 +198,46 @@ impl NoiseDeck {
                             break;
                         }
                     }
+                },
+                event = self.audio_event_rx.recv() => {
+                    match event {
+                        Some(AudioEvent::TrackStateChanged(track)) => {
+                            if let Err(e) = self.handle_track_state_changed(track).await {
+                                warn!(error = %e, "Error handling button tap event");
+                            }
+                        }
+                        None => {
+                            info!("Audio channel closed. I sure hope this is part of a shutdown sequence");
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), level = "trace")]
+    async fn handle_track_state_changed(&mut self, track: Arc<Track>) -> eyre::Result<()> {
+        let Some(btn) = self.tracks.get(&track.path) else {
+            warn!("Track state changed for unknown track {:?}", track);
+            return Ok(());
+        };
+        let mut btn_state = btn.inner.data.write().await;
+        let track_state = track.read().await;
+        btn_state.notification = if track_state.is_playing {
+            if let Some(remaining) = track_state.rem_duration() {
+                Some(format!("▶️\n{:.1}s", remaining.as_secs_f64()))
+            } else {
+                Some("▶️".to_string())
+            }
+        } else {
+            None
+        };
+        drop(btn_state);
+        self.ui_command_tx.send(UiCommand::Refresh).await?;
+        Ok(())
+    }
+    
     #[tracing::instrument(skip(self), level = "trace")]
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {

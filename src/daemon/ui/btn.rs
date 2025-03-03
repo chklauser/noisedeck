@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use uuid::Uuid;
 use crate::daemon::audio::Track;
-use crate::daemon::ui::{btn_play, btn_pop, btn_push, ButtonData, NoiseDeck};
+use crate::daemon::ui::{btn_play_stop, btn_pop, btn_push, ButtonData, NoiseDeck};
 
 #[derive(Default)]
 pub struct Button {
@@ -29,7 +29,7 @@ pub(in crate::daemon::ui) struct ButtonBuilder {
 
 pub(in crate::daemon::ui) enum ButtonBehavior {
     Push(Uuid),
-    Play,
+    PlayStop,
     Pop,
 }
 impl ButtonBehavior {
@@ -46,9 +46,9 @@ impl ButtonBehavior {
             ButtonBehavior::Push(id) => {
                 btn_push(deck, id.clone()).await?;
             }
-            ButtonBehavior::Play => {
+            ButtonBehavior::PlayStop => {
                 if let Some(track) = &button.track {
-                    btn_play(deck, track).await?;
+                    btn_play_stop(deck, track).await?;
                 } else {
                     warn!("Button has no track assigned");
                 }

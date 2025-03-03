@@ -51,11 +51,7 @@ pub async fn run() -> Result<(), eyre::Error> {
         ui::NoiseDeck::new(device.kind(), config.clone());
     deck.init().await?;
     let deck_finished = tokio::spawn(deck.run());
-    let audio_player_finished = tokio::task::spawn_blocking(|| {
-        if let Err(e) = audio::run(audio_event_tx, audio_command_rx) {
-            error!(error = %e, "Error running audio player");
-        }
-    });
+    let audio_player_finished = tokio::spawn(audio::run(audio_event_tx, audio_command_rx));
 
     let font_system = load_fonts().await?;
     let swash_cache = SwashCache::new();
@@ -112,8 +108,12 @@ pub async fn run() -> Result<(), eyre::Error> {
     }
     drop(reader);
     let device = state.shutdown();
-    deck_finished.await??;
-    audio_player_finished.await?;
+    if let Err(e) = deck_finished.await? {
+        error!("Deck task failed: {}", e);
+    }
+    if let Err(e) = audio_player_finished.await? {
+        error!("Audio player task failed: {}", e);
+    }
 
     if device.shutdown().await.is_err() {
         if device.sleep().await.is_err() {
@@ -146,7 +146,15 @@ impl DeckState {
         buffer.set_size(Some(72.0), Some(72.0));
         let mut attrs = Attrs::new();
         attrs.weight = Weight::EXTRA_BOLD;
-        buffer.set_text(&button.label, attrs, Shaping::Advanced);
+        buffer.set_text(
+            button
+                .notification
+                .as_ref()
+                .map(|s| &s[..])
+                .unwrap_or(&button.label),
+            attrs,
+            Shaping::Advanced,
+        );
         //buffer.set_text("Hello World, fine däy, eh?", attrs, Shaping::Advanced);
         buffer.shape_until_scroll(true);
         let text_color = cosmic_text::Color::rgb(0xFF, 0xFF, 0xFF);
