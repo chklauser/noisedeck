@@ -1,0 +1,118 @@
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
+use tracing::warn;
+use uuid::Uuid;
+use crate::daemon::audio::Track;
+use crate::daemon::ui::{btn_play, btn_pop, btn_push, ButtonData, NoiseDeck};
+
+#[derive(Default)]
+pub struct Button {
+    pub(in crate::daemon::ui) data: tokio::sync::RwLock<ButtonData>,
+    pub(in crate::daemon::ui) track: Option<Arc<Track>>,
+    pub(in crate::daemon::ui) on_tap: Option<ButtonBehavior>,
+}
+impl Button {
+    pub(in crate::daemon::ui) fn builder() -> ButtonBuilder {
+        ButtonBuilder {
+            inner: Button::default(),
+        }
+    }
+
+    pub fn none() -> ButtonRef {
+        static NONE: LazyLock<ButtonRef> = LazyLock::new(|| Button::builder().build().into());
+        NONE.clone()
+    }
+}
+pub(in crate::daemon::ui) struct ButtonBuilder {
+    inner: Button,
+}
+
+pub(in crate::daemon::ui) enum ButtonBehavior {
+    Push(Uuid),
+    Play,
+    Pop,
+}
+impl ButtonBehavior {
+    pub(in crate::daemon::ui) async fn invoke(
+        &self,
+        deck: &mut NoiseDeck,
+        button: &Button,
+        _data: &mut ButtonData,
+    ) -> eyre::Result<()> {
+        match self {
+            ButtonBehavior::Pop => {
+                btn_pop(deck).await?;
+            }
+            ButtonBehavior::Push(id) => {
+                btn_push(deck, id.clone()).await?;
+            }
+            ButtonBehavior::Play => {
+                if let Some(track) = &button.track {
+                    btn_play(deck, track).await?;
+                } else {
+                    warn!("Button has no track assigned");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ButtonBuilder {
+    pub fn on_tap(mut self, behavior: ButtonBehavior) -> Self {
+        self.inner.on_tap = Some(behavior);
+        self
+    }
+
+    pub fn data(mut self, data: ButtonData) -> Self {
+        *self.inner.data.get_mut() = data;
+        self
+    }
+
+    pub fn track(mut self, track_path: Arc<PathBuf>) -> Self {
+        self.inner.track = Some(Arc::new(Track::new(track_path)));
+        self
+    }
+
+    pub fn build(self) -> Button {
+        self.inner
+    }
+}
+
+impl std::fmt::Debug for Button {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Button").field("data", &self.data).finish()
+    }
+}
+
+
+#[derive(Clone)]
+pub struct ButtonRef {
+    pub(in crate::daemon::ui) inner: Arc<Button>,
+}
+impl ButtonRef {
+    pub async fn read(&self) -> ButtonData {
+        self.inner.data.read().await.clone()
+    }
+}
+impl From<Button> for ButtonRef {
+    fn from(inner: Button) -> Self {
+        ButtonRef {
+            inner: Arc::new(inner),
+        }
+    }
+}
+impl std::fmt::Debug for ButtonRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ButtonRef")
+            .field("data", &self.inner.data)
+            .finish()
+    }
+}
+
+impl PartialEq for ButtonRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+impl Eq for ButtonRef {}

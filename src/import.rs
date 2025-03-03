@@ -112,10 +112,10 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
                 }
             }
         }
-        config_pages.insert(*id, config::Page{
+        config_pages.insert(*id, Arc::new(config::Page{
             name: profile_names.get(&id).unwrap_or(&"Page?").to_string(),
             buttons
-        });
+        }));
     }
     
     let c = config::Config{

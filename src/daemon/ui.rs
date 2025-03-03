@@ -1,148 +1,43 @@
 use crate::config;
 use crate::config::Config;
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
+use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
-use eyre::OptionExt;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::iter::repeat;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-#[derive(Default)]
-pub struct Button {
-    data: tokio::sync::RwLock<ButtonData>,
-    pub track: Option<Arc<Track>>,
-    on_tap: Option<ButtonBehavior>,
-}
-impl Button {
-    pub(crate) fn builder() -> ButtonBuilder {
-        ButtonBuilder {
-            inner: Button::default(),
-        }
-    }
+mod btn;
 
-    pub fn none() -> ButtonRef {
-        static NONE: LazyLock<ButtonRef> = LazyLock::new(|| Button::builder().build().into());
-        NONE.clone()
-    }
-}
-pub struct ButtonBuilder {
-    inner: Button,
+pub use btn::ButtonRef;
+
+async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
+    deck.ui_command_tx.send(UiCommand::PopPage).await?;
+    Ok(())
 }
 
-pub enum ButtonBehavior {
-    Push(Uuid),
-    Play,
-    Pop,
-}
-impl ButtonBehavior {
-    pub async fn invoke(
-        &self,
-        deck: &mut NoiseDeck,
-        button: &Button,
-        _data: &mut ButtonData,
-    ) -> eyre::Result<()> {
-        match self {
-            ButtonBehavior::Pop => {
-                ButtonBehavior::pop(deck).await?;
-            }
-            ButtonBehavior::Push(id) => {
-                ButtonBehavior::push(deck, id.clone()).await?;
-            }
-            ButtonBehavior::Play => {
-                if let Some(track) = &button.track {
-                    ButtonBehavior::play(deck, track).await?;
-                } else {
-                    warn!("Button has no track assigned");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
-        deck.ui_command_tx.send(UiCommand::PopPage).await?;
-        Ok(())
-    }
-
-    async fn push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
-        let buttons = deck.render_page(&id)?;
-        deck.push_page(buttons).await?;
-        Ok(())
-    }
-
-    async fn play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
-        deck.audio_command_tx
-            .send(AudioCommand::Play(track.clone()))
-            .await?;
-        Ok(())
-    }
+async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
+    let buttons = deck.get_library_category(&id)?;
+    deck.push_page(buttons).await?;
+    Ok(())
 }
 
-impl ButtonBuilder {
-    pub fn on_tap(mut self, behavior: ButtonBehavior) -> Self {
-        self.inner.on_tap = Some(behavior);
-        self
-    }
-
-    pub fn data(mut self, data: ButtonData) -> Self {
-        *self.inner.data.get_mut() = data;
-        self
-    }
-
-    pub fn track(mut self, track_path: Arc<PathBuf>) -> Self {
-        self.inner.track = Some(Arc::new(Track::new(track_path)));
-        self
-    }
-
-    pub fn build(self) -> Button {
-        self.inner
-    }
-}
-
-impl std::fmt::Debug for Button {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Button").field("data", &self.data).finish()
-    }
+async fn btn_play(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
+    deck.audio_command_tx
+        .send(AudioCommand::Play(track.clone()))
+        .await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ButtonData {
     pub label: Arc<String>,
 }
-
-#[derive(Clone)]
-pub struct ButtonRef {
-    inner: Arc<Button>,
-}
-impl ButtonRef {
-    pub async fn read(&self) -> ButtonData {
-        self.inner.data.read().await.clone()
-    }
-}
-impl From<Button> for ButtonRef {
-    fn from(inner: Button) -> Self {
-        ButtonRef {
-            inner: Arc::new(inner),
-        }
-    }
-}
-impl std::fmt::Debug for ButtonRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ButtonRef")
-            .field("data", &self.inner.data)
-            .finish()
-    }
-}
-
-impl PartialEq for ButtonRef {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
-    }
-}
-impl Eq for ButtonRef {}
 
 pub struct NoiseDeck {
     ui_command_tx: Sender<UiCommand>,
@@ -152,6 +47,13 @@ pub struct NoiseDeck {
 
     kind: Kind,
     config: Arc<Config>,
+    library: HashMap<Uuid, LibraryCategoryState>,
+}
+
+struct LibraryCategoryState {
+    id: Uuid,
+    config: Arc<config::Page>,
+    buttons: Vec<ButtonRef>,
 }
 
 impl NoiseDeck {
@@ -183,6 +85,7 @@ impl NoiseDeck {
             audio_event_rx,
             kind,
             config,
+            library: HashMap::new(),
         };
         (
             deck,
@@ -194,28 +97,23 @@ impl NoiseDeck {
     }
 
     pub async fn init(&mut self) -> eyre::Result<()> {
-        let rendered_buttons = self.render_page(&self.config.start_page.clone())?;
+        let rendered_buttons = self.get_library_category(&self.config.start_page.clone())?;
         self.push_page(rendered_buttons).await?;
         Ok(())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn render_page(&mut self, page_id: &Uuid) -> eyre::Result<Vec<Option<ButtonRef>>> {
-        let page = self
-            .config
-            .pages
-            .get(&page_id)
-            .ok_or_eyre("Start page not found")?;
-
-        let max_configured_buttons = self.kind.key_count() as usize - 1;
-        let padding_btn_cnt = max_configured_buttons - page.buttons.len().min(max_configured_buttons);
-        debug!("Padding buttons: {}", padding_btn_cnt);
-        let rendered_buttons = page
-            .buttons
-            .iter()
-            .take(max_configured_buttons)
-            .map(|b| {
-                Some(match &b.behavior {
+    fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<Vec<Option<ButtonRef>>> {
+        fn layout_library_category(page: &config::Page, kind: &Kind) -> eyre::Result<Vec<ButtonRef>> {
+            let max_configured_buttons = kind.key_count() as usize - 1;
+            let padding_btn_cnt =
+                max_configured_buttons - page.buttons.len().min(max_configured_buttons);
+            debug!("Padding buttons: {}", padding_btn_cnt);
+            let rendered_buttons = page
+                .buttons
+                .iter()
+                .take(max_configured_buttons)
+                .map(|b| match &b.behavior {
                     config::ButtonBehavior::PushPage(id) => Button::builder()
                         .data(ButtonData {
                             label: b.label.clone(),
@@ -232,22 +130,37 @@ impl NoiseDeck {
                         .build()
                         .into(),
                 })
-            })
-            .chain([Some(
-                Button::builder()
+                .chain([Button::builder()
                     .data(ButtonData {
                         label: "Back".to_string().into(),
                     })
                     .on_tap(ButtonBehavior::Pop)
                     .build()
-                    .into(),
-            )])
-            .chain(
-                repeat(Some(Button::none()))
-                    .take(padding_btn_cnt),
-            )
-            .collect();
-        Ok(rendered_buttons)
+                    .into()])
+                .chain(repeat(Button::none()).take(padding_btn_cnt))
+                .collect();
+            Ok(rendered_buttons)
+        }
+
+        let state = match self.library.entry(page_id.clone()) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let page = self
+                    .config
+                    .pages
+                    .get(&page_id)
+                    .expect("page not found")
+                    .clone();
+                let initial_state = LibraryCategoryState {
+                    id: page_id.clone(),
+                    buttons: layout_library_category(&page, &self.kind)?,
+                    config: page,
+                };
+                &*e.insert(initial_state)
+            }
+        };
+
+        Ok(state.buttons.iter().map(|b| Some(b.clone())).collect())
     }
 
     #[tracing::instrument(skip_all)]
@@ -289,23 +202,5 @@ impl NoiseDeck {
     }
 }
 
-#[derive(Debug)]
-pub enum UiEvent {
-    ButtonTap(ButtonRef),
-}
-
-pub enum UiCommand {
-    Refresh,
-    PushPage(Vec<Option<ButtonRef>>),
-    PopPage,
-}
-
-impl std::fmt::Debug for UiCommand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UiCommand::Refresh => f.write_str("Refresh"),
-            UiCommand::PushPage(_) => f.write_str("PushPage"),
-            UiCommand::PopPage => f.write_str("PopPage"),
-        }
-    }
-}
+mod iface;
+pub use iface::{UiCommand, UiEvent};

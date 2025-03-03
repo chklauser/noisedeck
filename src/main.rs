@@ -53,7 +53,7 @@ mod config {
 
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Config {
-        pub pages: HashMap<Uuid, Page>,
+        pub pages: HashMap<Uuid, Arc<Page>>,
         pub start_page: Uuid,
     }
     
