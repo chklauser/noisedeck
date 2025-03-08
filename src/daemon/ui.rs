@@ -47,7 +47,7 @@ async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result
     let state = track.read().await;
     let track = track.clone();
     deck.audio_command_tx
-        .send(if state.is_playing {
+        .send(if state.playback.is_advancing() {
             AudioCommand::Stop(track)
         } else {
             AudioCommand::Play(track)
@@ -161,7 +161,7 @@ impl NoiseDeck {
 
     fn layout_page(&self, semantic_buttons: &[ButtonRef], view: &View) -> Vec<Option<ButtonRef>> {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
-        
+
         // Content
         page.extend(
             semantic_buttons
@@ -170,10 +170,10 @@ impl NoiseDeck {
                 .take(self.geo.n_content)
                 .map(|b| Some(b.clone())),
         );
-        
+
         // Pad content section
         page.extend(repeat(None).take(self.geo.n_content - page.len()));
-        
+
         // Back
         page.push(Some(
             Button::builder()
@@ -185,12 +185,17 @@ impl NoiseDeck {
                 .build()
                 .into(),
         ));
-        
+
         // Dynamic
         page.extend(repeat(None).take(self.geo.n_dynamic));
-        
+
         // Next
-        let total_n_pages = semantic_buttons.len() / self.geo.n_content + (if semantic_buttons.len() % self.geo.n_content > 0 { 1 } else { 0 });
+        let total_n_pages = semantic_buttons.len() / self.geo.n_content
+            + (if semantic_buttons.len() % self.geo.n_content > 0 {
+                1
+            } else {
+                0
+            });
         let current_page = view.offset / self.geo.n_content + 1;
         page.push(Some(
             Button::builder()
@@ -202,23 +207,29 @@ impl NoiseDeck {
                 .build()
                 .into(),
         ));
-        
+
         debug_assert_eq!(page.len(), self.kind.key_count() as usize);
         page
     }
 
     #[inline]
     fn current_view(&self) -> eyre::Result<&View> {
-        self.view_stack.last().ok_or_else(|| eyre::eyre!("nav stack empty"))
+        self.view_stack
+            .last()
+            .ok_or_else(|| eyre::eyre!("nav stack empty"))
     }
-    
+
     #[inline]
     fn current_view_mut(&mut self) -> eyre::Result<&mut View> {
-        self.view_stack.last_mut().ok_or_else(|| eyre::eyre!("nav stack empty"))
+        self.view_stack
+            .last_mut()
+            .ok_or_else(|| eyre::eyre!("nav stack empty"))
     }
-    
+
     async fn display_top_page(&mut self) -> eyre::Result<()> {
-        let semantic_buttons = self.get_library_category(&self.current_view()?.page_id.clone())?.to_vec();
+        let semantic_buttons = self
+            .get_library_category(&self.current_view()?.page_id.clone())?
+            .to_vec();
         let physical_buttons = self.layout_page(&semantic_buttons, self.current_view()?);
         self.ui_command_tx
             .send(UiCommand::Flip(physical_buttons))
@@ -331,8 +342,8 @@ impl NoiseDeck {
         };
         let mut btn_state = btn.inner.data.write().await;
         let track_state = track.read().await;
-        btn_state.notification = if track_state.is_playing {
-            if let Some(remaining) = track_state.rem_duration() {
+        btn_state.notification = if track_state.playback.is_advancing() {
+            if let Some(remaining) = track_state.rem_duration {
                 Some(format!("▶️\n{:.1}s", remaining.as_secs_f64()))
             } else {
                 Some("▶️".to_string())

@@ -220,10 +220,7 @@ impl DeckState {
                     if let Some(button) = self.button_by_key(key)? {
                         self.event_tx.send(ui::UiEvent::ButtonTap(button)).await?;
                     } else {
-                        warn!(
-                            "Button {} not found",
-                            key
-                        );
+                        warn!("Button {} not found", key);
                     }
                 }
                 unknown => {

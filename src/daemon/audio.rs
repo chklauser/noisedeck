@@ -1,20 +1,20 @@
 use crate::daemon::audio::BlockingAudioCommand::AsyncCommand;
 use eyre::Context;
-use rodio::decoder::DecoderBuilder;
-use rodio::{OutputStream, Sink, Source};
-use std::fs::File;
-use std::io::BufReader;
+use kira::effect::volume_control::VolumeControlHandle;
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
+use kira::sound::{FromFileError, PlaybackState};
+use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Easing, Tween};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, instrument, trace};
 
 pub struct Track {
     pub path: Arc<PathBuf>,
-    state: RwLock<TrackState>,
+    state: Mutex<TrackState>,
 }
 
 impl std::fmt::Debug for Track {
@@ -27,32 +27,47 @@ impl Track {
     pub fn new(path: Arc<PathBuf>) -> Self {
         Track {
             path,
-            state: RwLock::default(),
+            state: Mutex::default(),
         }
     }
 
-    pub async fn read(&self) -> TrackState {
-        TrackState {
-            sink: None,
-            ..*self.state.read().await
-        }
+    pub async fn read(&self) -> TrackStateData {
+        let guard = self.state.lock().await;
+        (&*guard).into()
     }
 }
 
 #[derive(Default)]
 pub struct TrackState {
-    sink: Option<Sink>,
-    pub is_playing: bool,
-    pub pct_played: f32,
+    sink: Option<StreamingSoundHandle<FromFileError>>,
     pub duration: Option<Duration>,
+}
+pub struct TrackStateData {
+    pub rem_duration: Option<Duration>,
+    pub playback: PlaybackState,
+}
+impl From<&TrackState> for TrackStateData {
+    fn from(state: &TrackState) -> Self {
+        TrackStateData {
+            rem_duration: state.rem_duration(),
+            playback: state.playback_state(),
+        }
+    }
 }
 
 impl TrackState {
     pub fn rem_duration(&self) -> Option<Duration> {
-        self.duration.map(|d| {
-            let played = d.mul_f32(self.pct_played);
+        self.duration.zip(self.sink.as_ref()).map(|(d, h)| {
+            let played = Duration::from_secs_f64(h.position());
             d.checked_sub(played).unwrap_or_default()
         })
+    }
+
+    pub fn playback_state(&self) -> PlaybackState {
+        self.sink
+            .as_ref()
+            .map(|s| s.state())
+            .unwrap_or(PlaybackState::Stopped)
     }
 }
 
@@ -71,16 +86,22 @@ pub enum BlockingAudioCommand {
 }
 
 struct AudioState {
-    stream: OutputStream,
+    manager: AudioManager,
     tracks: Vec<Arc<Track>>,
     event_tx: Sender<AudioEvent>,
+    global_volume: VolumeControlHandle,
 }
 impl AudioState {
     pub fn new(event_tx: Sender<AudioEvent>) -> eyre::Result<Self> {
-        let stream = rodio::OutputStreamBuilder::open_default_stream()
+        let mut settings = AudioManagerSettings::default();
+        let global_volume = settings
+            .main_track_builder
+            .add_effect(kira::effect::volume_control::VolumeControlBuilder::default());
+        let manager = AudioManager::<DefaultBackend>::new(settings)
             .context("Unable to create audio device")?;
         Ok(AudioState {
-            stream,
+            manager,
+            global_volume,
             tracks: Vec::new(),
             event_tx,
         })
@@ -93,41 +114,28 @@ impl AudioState {
             return Ok(());
         }
 
-        let sink = Sink::connect_new(self.stream.mixer());
-        let mut track_state_guard = track.state.blocking_write();
+        let mut track_state_guard = track.state.blocking_lock();
+        let sound_data =
+            StreamingSoundData::from_file(track.path.as_path()).with_context(|| {
+                format!(
+                    "Failed to load sound data from path {}",
+                    &track.path.display()
+                )
+            })?;
+        let total_duration = sound_data.duration();
+        let sound_data = sound_data.fade_in_tween(Tween {
+            duration: Duration::from_millis(2000),
+            easing: Easing::OutPowi(2),
+            ..Default::default()
+        });
+        let mut track_handle = self
+            .manager
+            .play(sound_data)
+            .with_context(|| format!("Failed to play {:?}", &track.path))?;
+        track_handle.set_loop_region(..);
 
-        let total_duration = {
-            let file = File::open(&*track.path)
-                .with_context(|| format!("Unable to open {:?}", &track.path))?;
-            let file_len = file.metadata()?.len();
-            let source = DecoderBuilder::new()
-                .with_data(BufReader::with_capacity(512 * 1024, file))
-                .with_hint("mp3")
-                .with_byte_len(file_len)
-                .with_gapless(true)
-                .with_seekable(true)
-                .build()
-                .with_context(|| format!("Unable to decode {:?}", &track.path))?;
-            source.total_duration()
-        };
-
-        let file = File::open(&*track.path)
-            .with_context(|| format!("Unable to open {:?}", &track.path))?;
-        let file_len = file.metadata()?.len();
-        let source = DecoderBuilder::new()
-            .with_data(BufReader::with_capacity(512 * 1024, file))
-            .with_hint("mp3")
-            .with_byte_len(file_len)
-            .with_gapless(true)
-            .with_seekable(true)
-            .build_looped()
-            .with_context(|| format!("Unable to decode {:?}", &track.path))?;
-        let source = source.fade_in(Duration::from_secs(2));
-        sink.append(source);
-        track_state_guard.sink.replace(sink);
-        track_state_guard.pct_played = 0.0;
-        track_state_guard.is_playing = true;
-        track_state_guard.duration = total_duration;
+        track_state_guard.sink = Some(track_handle);
+        track_state_guard.duration = Some(total_duration);
 
         self.tracks.push(track.clone());
         Ok(())
@@ -136,9 +144,12 @@ impl AudioState {
     #[instrument(skip_all, level = "debug")]
     pub fn shutdown(self) {
         for track in self.tracks {
-            let mut track_state_guard = track.state.blocking_write();
+            let mut track_state_guard = track.state.blocking_lock();
             if let Some(sink) = &mut track_state_guard.sink {
-                sink.stop();
+                sink.stop(Tween {
+                    duration: Duration::default(),
+                    ..Default::default()
+                })
             }
             track_state_guard.sink = None;
         }
@@ -198,13 +209,15 @@ fn run_sync(
                 }
             }
             AsyncCommand(AudioCommand::Stop(track)) => {
-                let mut track_state_guard = track.state.blocking_write();
+                let mut track_state_guard = track.state.blocking_lock();
                 if let Some(sink) = &mut track_state_guard.sink {
-                    sink.stop();
+                    sink.stop(Tween {
+                        duration: Duration::from_millis(2000),
+                        easing: Easing::InPowi(2),
+                        ..Default::default()
+                    });
                 }
                 track_state_guard.sink = None;
-                track_state_guard.pct_played = 0.0;
-                track_state_guard.is_playing = false;
                 drop(track_state_guard);
 
                 state.tracks.retain(|t| !Arc::ptr_eq(&track, t));
@@ -224,17 +237,6 @@ fn run_sync(
 }
 
 fn update_track_state(track: Arc<Track>, event_tx: &Sender<AudioEvent>) -> eyre::Result<()> {
-    let mut state = track.state.blocking_write();
-    if let Some(sink) = &state.sink {
-        if let Some(duration) = state.duration {
-            let multiples = sink.get_pos().as_millis() as f64 / duration.as_millis() as f64;
-            state.pct_played = (multiples - multiples.floor()).clamp(0.0, 1.0) as f32;
-        }
-    } else {
-        state.pct_played = 0.0;
-    };
-
-    drop(state);
     event_tx.blocking_send(AudioEvent::TrackStateChanged(track.clone()))?;
     Ok(())
 }
