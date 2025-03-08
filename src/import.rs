@@ -1,4 +1,8 @@
-use crate::import::elgato::{Action, ActionBehavior, PageManifest, ProfileManifest, ProfileManifestPages};
+use crate::config;
+use crate::config::Config;
+use crate::import::elgato::{
+    Action, ActionBehavior, PageManifest, ProfileManifest, ProfileManifestPages,
+};
 use base32::Alphabet;
 use clap::Args;
 use eyre::{Context, OptionExt, ensure};
@@ -11,8 +15,6 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 use zip::ZipArchive;
-use crate::config;
-use crate::config::Config;
 
 #[derive(Debug, Eq, PartialEq, Args, Clone)]
 pub struct ImportArgs {
@@ -45,7 +47,7 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
     );
 
     let profiles = decode_uuids(manifest_paths)?;
-    
+
     // parse manifests
     let mut profile_manifests = HashMap::new();
     for page in profiles.values() {
@@ -57,68 +59,63 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
         })?;
         profile_manifests.insert(page.profile_id, manifest);
     }
-    
+
     // reverse map profile names
     let mut profile_names = HashMap::new();
     for manifest in profile_manifests.values() {
-        let Some(keypad) = manifest
-            .controllers
-            .iter()
-            .filter(|c| c.ty == "Keypad")
-            .next()
-        else {
+        let Some(keypad) = manifest.controllers.iter().find(|c| c.ty == "Keypad") else {
             continue;
         };
         for (_, action) in keypad.actions.iter() {
             if let ActionBehavior::OpenChild { settings } = &action.behavior {
-                if let Some(title) = action.states.get(action.state).and_then(|x| x.title.as_ref()) {
+                if let Some(title) = action
+                    .states
+                    .get(action.state)
+                    .and_then(|x| x.title.as_ref())
+                {
                     profile_names.insert(settings.profile_uuid, &title[..]);
                 }
             }
         }
     }
-    
+
     // generate config
     let mut config_pages = HashMap::new();
     for (id, manifest) in profile_manifests.iter() {
         let mut buttons = Vec::new();
-        let Some(keypad) = manifest
-            .controllers
-            .iter()
-            .filter(|c| c.ty == "Keypad")
-            .next()
-        else {
+        let Some(keypad) = manifest.controllers.iter().find(|c| c.ty == "Keypad") else {
             continue;
         };
         for (pos, action) in keypad.actions.iter() {
             match &action.behavior {
                 ActionBehavior::BackToParent => {}
                 ActionBehavior::PlayAudio { settings } => {
-                    buttons.push(config::Button{
+                    buttons.push(config::Button {
                         label: label_of(action),
                         behavior: config::ButtonBehavior::PlaySound {
-                            path: settings.path.clone()
-                        }
+                            path: settings.path.clone(),
+                        },
                     });
                 }
-                ActionBehavior::OpenChild { settings } => {
-                    buttons.push(config::Button{
-                        label: label_of(action),
-                        behavior: config::ButtonBehavior::PushPage(settings.profile_uuid)
-                    })
-                }
+                ActionBehavior::OpenChild { settings } => buttons.push(config::Button {
+                    label: label_of(action),
+                    behavior: config::ButtonBehavior::PushPage(settings.profile_uuid),
+                }),
                 ActionBehavior::Unknown => {
                     debug!("Unknown action behavior: {}{:?}{:?}", id, pos, action);
                 }
             }
         }
-        config_pages.insert(*id, Arc::new(config::Page{
-            name: profile_names.get(&id).unwrap_or(&"Page?").to_string(),
-            buttons
-        }));
+        config_pages.insert(
+            *id,
+            Arc::new(config::Page {
+                name: profile_names.get(id).unwrap_or(&"Page?").to_string(),
+                buttons,
+            }),
+        );
     }
-    
-    let c = config::Config{
+
+    let c = Config {
         pages: config_pages,
         start_page: selected_profile.current,
     };
@@ -128,7 +125,9 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
 
 fn label_of(action: &Action) -> Arc<String> {
     static EMPTY_STRING: LazyLock<Arc<String>> = LazyLock::new(|| Arc::new("".to_string()));
-    action.states.get(action.state)
+    action
+        .states
+        .get(action.state)
         .and_then(|x| x.title.clone())
         .unwrap_or_else(|| EMPTY_STRING.clone())
 }
@@ -148,12 +147,16 @@ fn decode_uuids(
         };
         decode_uuid(&mut profiles, name, &mut inner_profile)?;
     }
-    return Ok(profiles);
+    Ok(profiles)
 }
 
-#[tracing::instrument(skip(profiles,name), level = "trace")]
-fn decode_uuid(profiles: &mut HashMap<Uuid, PageEntry>, name: String, mut inner_profile: &mut String) -> eyre::Result<()> {
-    ensure!(inner_profile.len() > 0);
+#[tracing::instrument(skip(profiles, name), level = "trace")]
+fn decode_uuid(
+    profiles: &mut HashMap<Uuid, PageEntry>,
+    name: String,
+    inner_profile: &mut String,
+) -> eyre::Result<()> {
+    ensure!(!inner_profile.is_empty());
     ensure!(inner_profile.ends_with('Z'));
 
     // I'm not 100% sure what the "real" encoding of the profile directory names are, but
@@ -167,10 +170,10 @@ fn decode_uuid(profiles: &mut HashMap<Uuid, PageEntry>, name: String, mut inner_
     // code below performs this transformation in reverse
 
     inner_profile.pop();
-    replace_ascii(&mut inner_profile, b'V', b'U');
-    replace_ascii(&mut inner_profile, b'W', b'V');
+    replace_ascii(inner_profile, b'V', b'U');
+    replace_ascii(inner_profile, b'W', b'V');
     inner_profile.make_ascii_uppercase();
-    let decoded_bytes = base32::decode(Alphabet::Rfc4648Hex { padding: false }, &inner_profile)
+    let decoded_bytes = base32::decode(Alphabet::Rfc4648Hex { padding: false }, inner_profile)
         .ok_or_eyre("failed to decode profile directory name")?;
     let inner_id = Uuid::from_slice(&decoded_bytes[..])
         .with_context(|| format!("{} is not a valid UUID", &inner_profile))?;
@@ -249,7 +252,7 @@ fn find_selected_profile(
             continue;
         }
         let mut manifest_file = archive
-            .by_name(&name)
+            .by_name(name)
             .with_context(|| format!("Failed to open manifest file {:?}", name))?;
         let mut manifest_buf = Vec::new();
         manifest_file.read_to_end(&mut manifest_buf)?;

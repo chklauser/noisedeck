@@ -1,9 +1,9 @@
+use crate::daemon::audio::Track;
+use crate::daemon::ui::{ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use uuid::Uuid;
-use crate::daemon::audio::Track;
-use crate::daemon::ui::{btn_play_stop, btn_pop, btn_push, ButtonData, NoiseDeck};
 
 #[derive(Default)]
 pub struct Button {
@@ -44,7 +44,7 @@ impl ButtonBehavior {
                 btn_pop(deck).await?;
             }
             ButtonBehavior::Push(id) => {
-                btn_push(deck, id.clone()).await?;
+                btn_push(deck, *id).await?;
             }
             ButtonBehavior::PlayStop => {
                 if let Some(track) = &button.track {
@@ -84,7 +84,6 @@ impl std::fmt::Debug for Button {
         f.debug_struct("Button").field("data", &self.data).finish()
     }
 }
-
 
 #[derive(Clone)]
 pub struct ButtonRef {

@@ -16,13 +16,12 @@ mod ui;
 
 #[tracing::instrument]
 pub async fn run() -> Result<(), eyre::Error> {
-    let mut hid = new_hidapi().context("Failed to create HIDAPI")?;
-    let devices = list_devices_async(&mut hid);
+    let hid = new_hidapi().context("Failed to create HIDAPI")?;
+    let devices = list_devices_async(&hid);
     info!("Found {} devices", devices.len());
     let (kind, serial) = devices
         .iter()
-        .filter(|(kind, _)| *kind == Kind::Original || *kind == Kind::OriginalV2)
-        .next()
+        .find(|(kind, _)| *kind == Kind::Original || *kind == Kind::OriginalV2)
         .ok_or_eyre("No supported StreamDeck found")?;
 
     let device = AsyncStreamDeck::connect(&hid, *kind, serial)
@@ -41,7 +40,7 @@ pub async fn run() -> Result<(), eyre::Error> {
         tokio::task::spawn_blocking(|| {
             crate::import::run_sync(ImportArgs {
                 path: env::var("import_path")?.into(),
-                profile_name: env::var("profile_name")?.into(),
+                profile_name: env::var("profile_name")?,
             })
         })
         .await??,
@@ -115,10 +114,8 @@ pub async fn run() -> Result<(), eyre::Error> {
         error!("Audio player task failed: {}", e);
     }
 
-    if device.shutdown().await.is_err() {
-        if device.sleep().await.is_err() {
-            device.set_brightness(15).await?;
-        }
+    if device.shutdown().await.is_err() && device.sleep().await.is_err() {
+        device.set_brightness(15).await?;
     }
 
     Ok(())
@@ -180,15 +177,16 @@ impl DeckState {
     pub async fn handle_command(&mut self, command: UiCommand) -> eyre::Result<()> {
         match command {
             UiCommand::Refresh => {
-                for (i, button) in self.page.clone()
+                for (i, button) in self
+                    .page
+                    .clone()
                     .into_iter()
                     .take(u8::MAX as usize)
                     .enumerate()
-                    .map(|(i, b)| (i, b))
                 {
                     let image = if let Some(r) = button.as_ref() {
                         let mut data = r.read().await;
-                        self.render_button_image(&mut data).await.into()
+                        self.render_button_image(&mut data).await
                     } else {
                         ImageBuffer::from_pixel(71, 71, Rgb([0u8, 0u8, 0u8])).into()
                     };
@@ -206,10 +204,7 @@ impl DeckState {
     }
 
     fn button_by_key(&mut self, key: u8) -> eyre::Result<Option<ButtonRef>> {
-        Ok(self
-            .page
-            .get::<usize>(key.into())
-            .and_then(|b| b.clone()))
+        Ok(self.page.get::<usize>(key.into()).and_then(|b| b.clone()))
     }
 
     #[tracing::instrument(level = "TRACE", skip_all)]

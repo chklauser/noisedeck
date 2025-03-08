@@ -1,6 +1,8 @@
+#![allow(dead_code)]
+
+use crate::import::ImportArgs;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::fmt::format::FmtSpan;
-use crate::import::ImportArgs;
 
 #[derive(Debug, Parser)]
 #[command(version, about, author)]
@@ -12,9 +14,8 @@ struct Cli {
 #[derive(Debug, Eq, PartialEq, Subcommand, Clone)]
 enum Commands {
     Daemon,
-    Import(ImportArgs)
+    Import(ImportArgs),
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,9 +47,9 @@ mod daemon;
 mod import;
 
 mod config {
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -56,24 +57,22 @@ mod config {
         pub pages: HashMap<Uuid, Arc<Page>>,
         pub start_page: Uuid,
     }
-    
+
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Page {
         pub name: String,
         pub buttons: Vec<Button>,
     }
-    
+
     #[derive(Debug, Serialize, Deserialize)]
     pub struct Button {
         pub label: Arc<String>,
         pub behavior: ButtonBehavior,
     }
-    
+
     #[derive(Debug, Serialize, Deserialize)]
     pub enum ButtonBehavior {
         PushPage(Uuid),
-        PlaySound {
-            path: Arc<String>,
-        }
+        PlaySound { path: Arc<String> },
     }
 }

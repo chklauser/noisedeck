@@ -3,12 +3,12 @@ use crate::config::Config;
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
+use eyre::OptionExt;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::iter::repeat;
 use std::path::PathBuf;
 use std::sync::Arc;
-use eyre::OptionExt;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -22,7 +22,7 @@ async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
         debug!("ignoring pop at home page");
         return Ok(());
     }
-    
+
     deck.nav_stack.pop();
     deck.display_top_page().await
 }
@@ -48,7 +48,7 @@ async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ButtonData {
     pub label: Arc<String>,
-    pub notification: Option<String>
+    pub notification: Option<String>,
 }
 
 pub struct NoiseDeck {
@@ -72,9 +72,7 @@ struct LibraryCategoryState {
 
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
-        self.ui_command_tx
-            .send(UiCommand::Flip(buttons))
-            .await?;
+        self.ui_command_tx.send(UiCommand::Flip(buttons)).await?;
         Ok(())
     }
 
@@ -115,26 +113,33 @@ impl NoiseDeck {
     pub async fn init(&mut self) -> eyre::Result<()> {
         btn_push(self, self.config.start_page).await
     }
-    
+
     fn layout_page(&self, semantic_buttons: &[ButtonRef]) -> Vec<Option<ButtonRef>> {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
         let (n_rows, n_cols) = self.kind.key_layout();
         let n_content_rows = n_rows - 1;
-        page.extend(semantic_buttons.iter().take((n_content_rows * n_cols).into()).map(|b| Some(b.clone())));
-        page.push(Some(Button::builder()
-            .data(ButtonData {
-                label: "Back".to_string().into(),
-                ..Default::default()
-            })
-            .on_tap(ButtonBehavior::Pop)
-            .build()
-            .into()));
+        page.extend(
+            semantic_buttons
+                .iter()
+                .take((n_content_rows * n_cols).into())
+                .map(|b| Some(b.clone())),
+        );
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Back".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Pop)
+                .build()
+                .into(),
+        ));
         page.extend(repeat(None).take((n_cols - 1).into()));
         page
     }
-    
+
     async fn display_top_page(&mut self) -> eyre::Result<()> {
-        let page_id = self.nav_stack.last().ok_or_eyre("nav stack empty")?.clone();
+        let page_id = *self.nav_stack.last().ok_or_eyre("nav stack empty")?;
         let semantic_buttons = self.get_library_category(&page_id)?;
         let physical_buttons = self.layout_page(&semantic_buttons);
         self.ui_command_tx
@@ -163,7 +168,7 @@ impl NoiseDeck {
                             label: b.label.clone(),
                             ..Default::default()
                         })
-                        .on_tap(ButtonBehavior::Push(id.clone()))
+                        .on_tap(ButtonBehavior::Push(*id))
                         .build()
                         .into(),
                     config::ButtonBehavior::PlaySound { path } => Button::builder()
@@ -180,27 +185,28 @@ impl NoiseDeck {
             Ok(track_buttons)
         }
 
-        let state = match self.library.entry(page_id.clone()) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                let page = self
-                    .config
-                    .pages
-                    .get(&page_id)
-                    .expect("page not found")
-                    .clone();
-                let buttons = layout_library_category(&page, &self.kind)?;
-                self.tracks.extend(buttons.iter().filter_map(|b|
-                    b.inner.track.as_ref().map(|t| (t.path.clone(), b.clone()))
-                ));
-                let initial_state = LibraryCategoryState {
-                    id: page_id.clone(),
-                    buttons,
-                    config: page,
-                };
-                &*e.insert(initial_state)
-            }
-        };
+        let state =
+            match self.library.entry(*page_id) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    let page = self
+                        .config
+                        .pages
+                        .get(page_id)
+                        .expect("page not found")
+                        .clone();
+                    let buttons = layout_library_category(&page, &self.kind)?;
+                    self.tracks.extend(buttons.iter().filter_map(|b| {
+                        b.inner.track.as_ref().map(|t| (t.path.clone(), b.clone()))
+                    }));
+                    let initial_state = LibraryCategoryState {
+                        id: *page_id,
+                        buttons,
+                        config: page,
+                    };
+                    &*e.insert(initial_state)
+                }
+            };
 
         Ok(state.buttons.clone())
     }
@@ -260,7 +266,7 @@ impl NoiseDeck {
         self.ui_command_tx.send(UiCommand::Refresh).await?;
         Ok(())
     }
-    
+
     #[tracing::instrument(skip(self), level = "trace")]
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {

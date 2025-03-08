@@ -1,7 +1,7 @@
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use serde::{Deserialize, Deserializer};
 use uuid::Uuid;
 
 #[derive(Deserialize, Debug)]
@@ -16,7 +16,7 @@ pub struct ProfileManifest {
 pub struct ProfileManifestPages {
     pub current: Uuid,
     pub default: Uuid,
-    pub pages: Vec<Uuid>
+    pub pages: Vec<Uuid>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -30,7 +30,7 @@ pub struct PageManifest {
 pub struct Controller {
     #[serde(rename = "Type")]
     pub ty: String,
-    pub actions: HashMap<Pos,Action>,
+    pub actions: HashMap<Pos, Action>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -47,19 +47,19 @@ pub struct Action {
 pub enum ActionBehavior {
     #[serde(rename = "com.elgato.streamdeck.profile.backtoparent")]
     BackToParent,
-    
+
     #[serde(rename = "com.elgato.streamdeck.soundboard.playaudio")]
     PlayAudio {
         #[serde(rename = "Settings")]
         settings: AudioSettings,
     },
-    
+
     #[serde(rename = "com.elgato.streamdeck.profile.openchild")]
     OpenChild {
         #[serde(rename = "Settings")]
         settings: OpenChildSettings,
     },
-    
+
     #[default]
     #[serde(other)]
     Unknown,
@@ -82,7 +82,7 @@ pub struct AudioSettings {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
-pub struct State{
+pub struct State {
     #[serde(default)]
     pub show_title: bool,
     pub title: Option<Arc<String>>,
@@ -104,7 +104,7 @@ impl FromStr for Pos {
         let y = parts[1]
             .parse()
             .map_err(|_| "Invalid y coordinate".to_string())?;
-        Ok(Pos(x,y))
+        Ok(Pos(x, y))
     }
 }
 impl<'de> Deserialize<'de> for Pos {

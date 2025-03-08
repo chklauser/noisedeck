@@ -1,12 +1,12 @@
 use crate::daemon::audio::BlockingAudioCommand::AsyncCommand;
-use eyre::{Context};
+use eyre::Context;
+use rodio::decoder::DecoderBuilder;
 use rodio::{OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use rodio::decoder::DecoderBuilder;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::MissedTickBehavior;
@@ -19,9 +19,7 @@ pub struct Track {
 
 impl std::fmt::Debug for Track {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Track")
-            .field("path", &self.path)
-            .finish()
+        f.debug_struct("Track").field("path", &self.path).finish()
     }
 }
 
@@ -34,7 +32,10 @@ impl Track {
     }
 
     pub async fn read(&self) -> TrackState {
-        TrackState { sink: None, ..*self.state.read().await }
+        TrackState {
+            sink: None,
+            ..*self.state.read().await
+        }
     }
 }
 
@@ -76,7 +77,8 @@ struct AudioState {
 }
 impl AudioState {
     pub fn new(event_tx: Sender<AudioEvent>) -> eyre::Result<Self> {
-        let stream = rodio::OutputStreamBuilder::open_default_stream().context("Unable to create audio device")?;
+        let stream = rodio::OutputStreamBuilder::open_default_stream()
+            .context("Unable to create audio device")?;
         Ok(AudioState {
             stream,
             tracks: Vec::new(),
@@ -86,22 +88,21 @@ impl AudioState {
 
     #[instrument(skip_all, level = "debug")]
     fn play(&mut self, track: Arc<Track>) -> eyre::Result<()> {
-        if self.tracks.iter().any(|t| Arc::ptr_eq(&track, t)){
+        if self.tracks.iter().any(|t| Arc::ptr_eq(&track, t)) {
             info!("Track {:?} already playing, not changing anything", &track);
             return Ok(());
         }
-        
+
         let sink = Sink::connect_new(&self.stream.mixer());
         let mut track_state_guard = track.state.blocking_write();
 
         let total_duration = {
-            let file =
-                File::open(&*track.path)
-                    .with_context(|| format!("Unable to open {:?}", &track.path))?;
+            let file = File::open(&*track.path)
+                .with_context(|| format!("Unable to open {:?}", &track.path))?;
             let file_len = file.metadata()?.len();
             let source = DecoderBuilder::new()
                 .with_data(BufReader::with_capacity(512 * 1024, file))
-                .with_hint("mp3".into())
+                .with_hint("mp3")
                 .with_byte_len(file_len)
                 .with_gapless(true)
                 .with_seekable(true)
@@ -109,21 +110,19 @@ impl AudioState {
                 .with_context(|| format!("Unable to decode {:?}", &track.path))?;
             source.total_duration()
         };
-        
-        let file =
-            File::open(&*track.path)
-                .with_context(|| format!("Unable to open {:?}", &track.path))?;
+
+        let file = File::open(&*track.path)
+            .with_context(|| format!("Unable to open {:?}", &track.path))?;
         let file_len = file.metadata()?.len();
         let source = DecoderBuilder::new()
             .with_data(BufReader::with_capacity(512 * 1024, file))
-            .with_hint("mp3".into())
+            .with_hint("mp3")
             .with_byte_len(file_len)
             .with_gapless(true)
             .with_seekable(true)
             .build_looped()
             .with_context(|| format!("Unable to decode {:?}", &track.path))?;
-        let source = source
-            .fade_in(Duration::from_secs(2));
+        let source = source.fade_in(Duration::from_secs(2));
         sink.append(source);
         track_state_guard.sink.replace(sink);
         track_state_guard.pct_played = 0.0;
@@ -161,14 +160,14 @@ pub async fn run(
                         trace!("Audio command channel closed, shutting down translation loop");
                         break 'task;
                     };
-                    if let Err(_) = blocking_cmd_tx.send(AsyncCommand(command)) {
+                    if blocking_cmd_tx.send(AsyncCommand(command)).is_err() {
                         trace!("Blocking audio command channel closed, shutting down translation loop (a)");
                         break 'task;
                     }
                 },
                 _ = timeout.tick() => {
                     trace!("ask for audio state update");
-                    if let Err(_) = blocking_cmd_tx.send(BlockingAudioCommand::UpdateState) {
+                    if blocking_cmd_tx.send(BlockingAudioCommand::UpdateState).is_err() {
                         trace!("Blocking audio command channel closed, shutting down translation loop (i)");
                         break 'task;
                     }
@@ -197,7 +196,7 @@ fn run_sync(
                 if let Err(e) = state.play(track) {
                     error!("Error playing track: {:?}", e);
                 }
-            },
+            }
             AsyncCommand(AudioCommand::Stop(track)) => {
                 let mut track_state_guard = track.state.blocking_write();
                 if let Some(sink) = &mut track_state_guard.sink {
@@ -207,10 +206,10 @@ fn run_sync(
                 track_state_guard.pct_played = 0.0;
                 track_state_guard.is_playing = false;
                 drop(track_state_guard);
-                
+
                 state.tracks.retain(|t| !Arc::ptr_eq(&track, t));
                 update_track_state(track, &state.event_tx)?
-            },
+            }
             BlockingAudioCommand::UpdateState => {
                 for track in state.tracks.iter() {
                     update_track_state(track.clone(), &state.event_tx)?
@@ -231,7 +230,7 @@ fn update_track_state(track: Arc<Track>, event_tx: &Sender<AudioEvent>) -> eyre:
             let multiples = sink.get_pos().as_millis() as f64 / duration.as_millis() as f64;
             state.pct_played = (multiples - multiples.floor()).clamp(0.0, 1.0) as f32;
         }
-    }else {
+    } else {
         state.pct_played = 0.0;
     };
 
