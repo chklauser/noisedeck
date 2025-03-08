@@ -107,6 +107,17 @@ impl FromStr for Pos {
         Ok(Pos(x, y))
     }
 }
+impl PartialOrd for Pos {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Pos {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.1.cmp(&other.1).then(self.0.cmp(&other.0))
+    }
+}
+
 impl<'de> Deserialize<'de> for Pos {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

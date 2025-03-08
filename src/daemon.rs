@@ -8,7 +8,6 @@ use eyre::{Context, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use std::env;
-use std::iter::repeat_n;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 

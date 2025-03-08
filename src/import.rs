@@ -86,7 +86,9 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
         let Some(keypad) = manifest.controllers.iter().find(|c| c.ty == "Keypad") else {
             continue;
         };
-        for (pos, action) in keypad.actions.iter() {
+        let mut actions = keypad.actions.iter().collect::<Vec<_>>();
+        actions.sort_by_key(|(pos, _)| *pos);
+        for (pos, action) in actions.iter() {
             match &action.behavior {
                 ActionBehavior::BackToParent => {}
                 ActionBehavior::PlayAudio { settings } => {

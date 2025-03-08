@@ -244,9 +244,6 @@ impl NoiseDeck {
             kind: &Kind,
         ) -> eyre::Result<Vec<ButtonRef>> {
             let max_configured_buttons = kind.key_count() as usize - 1;
-            let padding_btn_cnt =
-                max_configured_buttons - page.buttons.len().min(max_configured_buttons);
-            debug!("Padding buttons: {}", padding_btn_cnt);
             let track_buttons = page
                 .buttons
                 .iter()
