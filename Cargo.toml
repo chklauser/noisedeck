@@ -24,4 +24,4 @@ uuid = { version = "1.15.1", features = ["serde"] }
 
 # override rodio source to pull from roderickvd:refactor/decoder-improvements
 [patch.crates-io]
-rodio = { git = "https://github.com/roderickvd/rodio.git", branch = "refactor/decoder-improvements" }
+rodio = { git = "https://github.com/RustAudio/rodio.git", branch = "master" }

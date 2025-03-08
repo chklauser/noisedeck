@@ -89,6 +89,7 @@ pub async fn run() -> Result<(), eyre::Error> {
                     }
                 } else {
                     info!("Command channel closed");
+                    break 'infinite
                 }
             },
             sigint_result = &mut sigint => {
@@ -220,9 +221,8 @@ impl DeckState {
                         self.event_tx.send(ui::UiEvent::ButtonTap(button)).await?;
                     } else {
                         warn!(
-                            "Button {} not found at page stack depth {}",
-                            key,
-                            self.page.len()
+                            "Button {} not found",
+                            key
                         );
                     }
                 }

@@ -93,7 +93,7 @@ impl AudioState {
             return Ok(());
         }
 
-        let sink = Sink::connect_new(&self.stream.mixer());
+        let sink = Sink::connect_new(self.stream.mixer());
         let mut track_state_guard = track.state.blocking_write();
 
         let total_duration = {

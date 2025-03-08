@@ -3,7 +3,6 @@ use crate::config::Config;
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
-use eyre::OptionExt;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::iter::repeat;
@@ -18,17 +17,29 @@ mod btn;
 pub use btn::ButtonRef;
 
 async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
-    if deck.nav_stack.len() <= 1 {
+    if deck.view_stack.len() <= 1 {
         debug!("ignoring pop at home page");
         return Ok(());
     }
 
-    deck.nav_stack.pop();
+    deck.view_stack.pop();
     deck.display_top_page().await
 }
 
 async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
-    deck.nav_stack.push(id);
+    deck.view_stack.push(View::new(id));
+    deck.display_top_page().await
+}
+
+async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
+    let geo = deck.geo;
+    let view = deck.current_view()?;
+    let page_len = deck.get_library_category(&view.page_id.clone())?.len();
+    let view = deck.current_view_mut()?;
+    view.offset += geo.n_content;
+    if view.offset >= page_len {
+        view.offset = 0;
+    }
     deck.display_top_page().await
 }
 
@@ -58,16 +69,49 @@ pub struct NoiseDeck {
     audio_event_rx: Receiver<AudioEvent>,
 
     kind: Kind,
+    geo: Geometry,
     config: Arc<Config>,
     library: HashMap<Uuid, LibraryCategoryState>,
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
-    nav_stack: Vec<Uuid>,
+    view_stack: Vec<View>,
+}
+
+#[derive(Debug)]
+pub struct View {
+    page_id: Uuid,
+    offset: usize,
+}
+impl View {
+    pub fn new(page_id: Uuid) -> Self {
+        View { page_id, offset: 0 }
+    }
 }
 
 struct LibraryCategoryState {
     id: Uuid,
     config: Arc<config::Page>,
     buttons: Vec<ButtonRef>,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct Geometry {
+    cols: usize,
+    rows: usize,
+    n_content: usize,
+    n_dynamic: usize,
+}
+impl From<Kind> for Geometry {
+    fn from(kind: Kind) -> Self {
+        let (rows, cols) = kind.key_layout();
+        let n_content = (rows - 1) * cols;
+        let n_dynamic = cols - 2;
+        Geometry {
+            cols: cols.into(),
+            rows: rows.into(),
+            n_content: n_content.into(),
+            n_dynamic: n_dynamic.into(),
+        }
+    }
 }
 
 impl NoiseDeck {
@@ -95,8 +139,9 @@ impl NoiseDeck {
             ui_event_rx,
             audio_command_tx,
             audio_event_rx,
+            geo: kind.into(),
             kind,
-            nav_stack: vec![config.start_page],
+            view_stack: vec![View::new(config.start_page)],
             config,
             library: HashMap::new(),
             tracks: HashMap::new(),
@@ -111,19 +156,25 @@ impl NoiseDeck {
     }
 
     pub async fn init(&mut self) -> eyre::Result<()> {
-        btn_push(self, self.config.start_page).await
+        self.display_top_page().await
     }
 
-    fn layout_page(&self, semantic_buttons: &[ButtonRef]) -> Vec<Option<ButtonRef>> {
+    fn layout_page(&self, semantic_buttons: &[ButtonRef], view: &View) -> Vec<Option<ButtonRef>> {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
-        let (n_rows, n_cols) = self.kind.key_layout();
-        let n_content_rows = n_rows - 1;
+        
+        // Content
         page.extend(
             semantic_buttons
                 .iter()
-                .take((n_content_rows * n_cols).into())
+                .skip(view.offset)
+                .take(self.geo.n_content)
                 .map(|b| Some(b.clone())),
         );
+        
+        // Pad content section
+        page.extend(repeat(None).take(self.geo.n_content - page.len()));
+        
+        // Back
         page.push(Some(
             Button::builder()
                 .data(ButtonData {
@@ -134,14 +185,41 @@ impl NoiseDeck {
                 .build()
                 .into(),
         ));
-        page.extend(repeat(None).take((n_cols - 1).into()));
+        
+        // Dynamic
+        page.extend(repeat(None).take(self.geo.n_dynamic));
+        
+        // Next
+        let total_n_pages = semantic_buttons.len() / self.geo.n_content + (if semantic_buttons.len() % self.geo.n_content > 0 { 1 } else { 0 });
+        let current_page = view.offset / self.geo.n_content + 1;
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: format!("Next\n{current_page}/{total_n_pages}").into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Rotate)
+                .build()
+                .into(),
+        ));
+        
+        debug_assert_eq!(page.len(), self.kind.key_count() as usize);
         page
     }
 
+    #[inline]
+    fn current_view(&self) -> eyre::Result<&View> {
+        self.view_stack.last().ok_or_else(|| eyre::eyre!("nav stack empty"))
+    }
+    
+    #[inline]
+    fn current_view_mut(&mut self) -> eyre::Result<&mut View> {
+        self.view_stack.last_mut().ok_or_else(|| eyre::eyre!("nav stack empty"))
+    }
+    
     async fn display_top_page(&mut self) -> eyre::Result<()> {
-        let page_id = *self.nav_stack.last().ok_or_eyre("nav stack empty")?;
-        let semantic_buttons = self.get_library_category(&page_id)?;
-        let physical_buttons = self.layout_page(&semantic_buttons);
+        let semantic_buttons = self.get_library_category(&self.current_view()?.page_id.clone())?.to_vec();
+        let physical_buttons = self.layout_page(&semantic_buttons, self.current_view()?);
         self.ui_command_tx
             .send(UiCommand::Flip(physical_buttons))
             .await?;
@@ -149,7 +227,7 @@ impl NoiseDeck {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<Vec<ButtonRef>> {
+    fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<&[ButtonRef]> {
         fn layout_library_category(
             page: &config::Page,
             kind: &Kind,
@@ -208,7 +286,7 @@ impl NoiseDeck {
                 }
             };
 
-        Ok(state.buttons.clone())
+        Ok(&state.buttons)
     }
 
     #[tracing::instrument(skip_all)]

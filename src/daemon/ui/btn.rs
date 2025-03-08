@@ -1,5 +1,5 @@
 use crate::daemon::audio::Track;
-use crate::daemon::ui::{ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push};
+use crate::daemon::ui::{ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push, btn_rotate};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
@@ -31,6 +31,7 @@ pub(in crate::daemon::ui) enum ButtonBehavior {
     Push(Uuid),
     PlayStop,
     Pop,
+    Rotate,
 }
 impl ButtonBehavior {
     pub(in crate::daemon::ui) async fn invoke(
@@ -52,6 +53,9 @@ impl ButtonBehavior {
                 } else {
                     warn!("Button has no track assigned");
                 }
+            }
+            ButtonBehavior::Rotate => {
+                btn_rotate(deck).await?;
             }
         }
         Ok(())
