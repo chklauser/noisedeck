@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::iter::repeat;
 use std::path::PathBuf;
 use std::sync::Arc;
+use eyre::OptionExt;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -17,14 +18,18 @@ mod btn;
 pub use btn::ButtonRef;
 
 async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
-    deck.ui_command_tx.send(UiCommand::PopPage).await?;
-    Ok(())
+    if deck.nav_stack.len() <= 1 {
+        debug!("ignoring pop at home page");
+        return Ok(());
+    }
+    
+    deck.nav_stack.pop();
+    deck.display_top_page().await
 }
 
 async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
-    let buttons = deck.get_library_category(&id)?;
-    deck.push_page(buttons).await?;
-    Ok(())
+    deck.nav_stack.push(id);
+    deck.display_top_page().await
 }
 
 async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
@@ -55,7 +60,8 @@ pub struct NoiseDeck {
     kind: Kind,
     config: Arc<Config>,
     library: HashMap<Uuid, LibraryCategoryState>,
-    tracks: HashMap<Arc<PathBuf>, ButtonRef>
+    tracks: HashMap<Arc<PathBuf>, ButtonRef>,
+    nav_stack: Vec<Uuid>,
 }
 
 struct LibraryCategoryState {
@@ -67,7 +73,7 @@ struct LibraryCategoryState {
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
         self.ui_command_tx
-            .send(UiCommand::PushPage(buttons))
+            .send(UiCommand::Flip(buttons))
             .await?;
         Ok(())
     }
@@ -92,6 +98,7 @@ impl NoiseDeck {
             audio_command_tx,
             audio_event_rx,
             kind,
+            nav_stack: vec![config.start_page],
             config,
             library: HashMap::new(),
             tracks: HashMap::new(),
@@ -106,13 +113,38 @@ impl NoiseDeck {
     }
 
     pub async fn init(&mut self) -> eyre::Result<()> {
-        let rendered_buttons = self.get_library_category(&self.config.start_page.clone())?;
-        self.push_page(rendered_buttons).await?;
+        btn_push(self, self.config.start_page).await
+    }
+    
+    fn layout_page(&self, semantic_buttons: &[ButtonRef]) -> Vec<Option<ButtonRef>> {
+        let mut page = Vec::with_capacity(self.kind.key_count().into());
+        let (n_rows, n_cols) = self.kind.key_layout();
+        let n_content_rows = n_rows - 1;
+        page.extend(semantic_buttons.iter().take((n_content_rows * n_cols).into()).map(|b| Some(b.clone())));
+        page.push(Some(Button::builder()
+            .data(ButtonData {
+                label: "Back".to_string().into(),
+                ..Default::default()
+            })
+            .on_tap(ButtonBehavior::Pop)
+            .build()
+            .into()));
+        page.extend(repeat(None).take((n_cols - 1).into()));
+        page
+    }
+    
+    async fn display_top_page(&mut self) -> eyre::Result<()> {
+        let page_id = self.nav_stack.last().ok_or_eyre("nav stack empty")?.clone();
+        let semantic_buttons = self.get_library_category(&page_id)?;
+        let physical_buttons = self.layout_page(&semantic_buttons);
+        self.ui_command_tx
+            .send(UiCommand::Flip(physical_buttons))
+            .await?;
         Ok(())
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<Vec<Option<ButtonRef>>> {
+    fn get_library_category(&mut self, page_id: &Uuid) -> eyre::Result<Vec<ButtonRef>> {
         fn layout_library_category(
             page: &config::Page,
             kind: &Kind,
@@ -121,7 +153,7 @@ impl NoiseDeck {
             let padding_btn_cnt =
                 max_configured_buttons - page.buttons.len().min(max_configured_buttons);
             debug!("Padding buttons: {}", padding_btn_cnt);
-            let rendered_buttons = page
+            let track_buttons = page
                 .buttons
                 .iter()
                 .take(max_configured_buttons)
@@ -144,17 +176,8 @@ impl NoiseDeck {
                         .build()
                         .into(),
                 })
-                .chain([Button::builder()
-                    .data(ButtonData {
-                        label: "Back".to_string().into(),
-                        ..Default::default()
-                    })
-                    .on_tap(ButtonBehavior::Pop)
-                    .build()
-                    .into()])
-                .chain(repeat(Button::none()).take(padding_btn_cnt))
                 .collect();
-            Ok(rendered_buttons)
+            Ok(track_buttons)
         }
 
         let state = match self.library.entry(page_id.clone()) {
@@ -179,7 +202,7 @@ impl NoiseDeck {
             }
         };
 
-        Ok(state.buttons.iter().map(|b| Some(b.clone())).collect())
+        Ok(state.buttons.clone())
     }
 
     #[tracing::instrument(skip_all)]

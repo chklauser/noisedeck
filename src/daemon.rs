@@ -56,7 +56,7 @@ pub async fn run() -> Result<(), eyre::Error> {
     let font_system = load_fonts().await?;
     let swash_cache = SwashCache::new();
     let mut state = DeckState {
-        page_stack: vec![],
+        page: vec![],
         font_system,
         swash_cache,
         device,
@@ -125,7 +125,7 @@ pub async fn run() -> Result<(), eyre::Error> {
 }
 
 struct DeckState {
-    page_stack: Vec<Vec<Option<ButtonRef>>>,
+    page: Vec<Option<ButtonRef>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     device: AsyncStreamDeck,
@@ -180,12 +180,11 @@ impl DeckState {
     pub async fn handle_command(&mut self, command: UiCommand) -> eyre::Result<()> {
         match command {
             UiCommand::Refresh => {
-                for (i, button) in self
-                    .current_page()?
-                    .iter()
+                for (i, button) in self.page.clone()
+                    .into_iter()
                     .take(u8::MAX as usize)
                     .enumerate()
-                    .map(|(i, b)| (i, b.clone()))
+                    .map(|(i, b)| (i, b))
                 {
                     let image = if let Some(r) = button.as_ref() {
                         let mut data = r.read().await;
@@ -198,34 +197,18 @@ impl DeckState {
                 }
                 self.device.flush().await?;
             }
-            UiCommand::PushPage(new_page) => {
-                self.page_stack.push(new_page);
+            UiCommand::Flip(new_page) => {
+                self.page = new_page;
                 Box::pin(self.handle_command(UiCommand::Refresh)).await?;
-            }
-            UiCommand::PopPage => {
-                if self.page_stack.len() > 1 {
-                    self.page_stack.pop();
-                } else {
-                    error!("Attempted to pop last page");
-                }
             }
         }
         Ok(())
     }
 
-    fn current_page(&mut self) -> eyre::Result<Vec<Option<ButtonRef>>> {
-        self.page_stack
-            .last()
-            .ok_or_eyre("Empty page stack")
-            .map(|p| p.clone())
-    }
-
     fn button_by_key(&mut self, key: u8) -> eyre::Result<Option<ButtonRef>> {
         Ok(self
-            .page_stack
-            .last()
-            .ok_or_eyre("Empty page stack")?
-            .get(key as usize)
+            .page
+            .get::<usize>(key.into())
             .and_then(|b| b.clone()))
     }
 
@@ -244,7 +227,7 @@ impl DeckState {
                         warn!(
                             "Button {} not found at page stack depth {}",
                             key,
-                            self.page_stack.len()
+                            self.page.len()
                         );
                     }
                 }

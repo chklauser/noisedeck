@@ -7,16 +7,14 @@ pub enum UiEvent {
 
 pub enum UiCommand {
     Refresh,
-    PushPage(Vec<Option<ButtonRef>>),
-    PopPage,
+    Flip(Vec<Option<ButtonRef>>),
 }
 
 impl std::fmt::Debug for UiCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UiCommand::Refresh => f.write_str("Refresh"),
-            UiCommand::PushPage(_) => f.write_str("PushPage"),
-            UiCommand::PopPage => f.write_str("PopPage"),
+            UiCommand::Flip(_) => f.write_str("PushPage"),
         }
     }
 }

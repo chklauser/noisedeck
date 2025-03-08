@@ -1,6 +1,6 @@
 use crate::daemon::audio::BlockingAudioCommand::AsyncCommand;
 use eyre::{Context};
-use rodio::{Decoder, OutputStream, Sink, Source};
+use rodio::{OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
