@@ -8,8 +8,9 @@ use eyre::{Context, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use std::env;
+use std::iter::repeat_n;
 use std::sync::Arc;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
 mod ui;
@@ -56,6 +57,7 @@ pub async fn run() -> Result<(), eyre::Error> {
     let swash_cache = SwashCache::new();
     let mut state = DeckState {
         page: vec![],
+        render_cache: vec![],
         font_system,
         swash_cache,
         device,
@@ -122,8 +124,13 @@ pub async fn run() -> Result<(), eyre::Error> {
     Ok(())
 }
 
+struct RenderCacheEntry {
+    button: Option<ButtonData>,
+}
+
 struct DeckState {
     page: Vec<Option<ButtonRef>>,
+    render_cache: Vec<Option<RenderCacheEntry>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     device: AsyncStreamDeck,
@@ -178,6 +185,7 @@ impl DeckState {
     pub async fn handle_command(&mut self, command: UiCommand) -> eyre::Result<()> {
         match command {
             UiCommand::Refresh => {
+                let mut flush_required = false;
                 for (i, button) in self
                     .page
                     .clone()
@@ -187,17 +195,45 @@ impl DeckState {
                 {
                     let image = if let Some(r) = button.as_ref() {
                         let mut data = r.read().await;
-                        self.render_button_image(&mut data).await
+                        if self
+                            .render_cache
+                            .get(i)
+                            .and_then(|e| e.as_ref())
+                            .map(|r| r.button.as_ref() == Some(&data))
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        } else {
+                            self.render_cache[i] = Some(RenderCacheEntry {
+                                button: Some(data.clone()),
+                            });
+                            self.render_button_image(&mut data).await
+                        }
+                    } else if self
+                        .render_cache
+                        .get(i)
+                        .and_then(|e| e.as_ref())
+                        .map(|e| e.button.is_none())
+                        .unwrap_or(false)
+                    {
+                        continue;
                     } else {
+                        self.render_cache[i] = Some(RenderCacheEntry { button: None });
                         ImageBuffer::from_pixel(71, 71, Rgb([0u8, 0u8, 0u8])).into()
                     };
-
                     self.device.set_button_image(i as u8, image).await?;
+                    flush_required = true;
                 }
-                self.device.flush().await?;
+
+                if flush_required {
+                    trace!("Flushing stream deck");
+                    self.device.flush().await?;
+                }
             }
             UiCommand::Flip(new_page) => {
                 self.page = new_page;
+                self.render_cache.clear();
+                self.render_cache.extend((0..self.page.len()).map(|_| None));
                 Box::pin(self.handle_command(UiCommand::Refresh)).await?;
             }
         }
