@@ -1,21 +1,35 @@
+use crate::config::{ButtonBehavior, Config, Page};
 use crate::daemon::ui::{ButtonData, ButtonRef, UiCommand};
 use crate::import::ImportArgs;
+use clap::Args;
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
 use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};
-use eyre::{Context, OptionExt, Report};
+use eyre::{Context, ContextCompat, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
-use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
 mod ui;
 
-#[tracing::instrument]
-pub async fn run() -> Result<(), eyre::Error> {
+#[derive(Debug, Eq, PartialEq, Args, Clone)]
+pub struct DaemonArgs {
+    #[command(flatten)]
+    import: ImportArgs,
+
+    #[arg(long, env = "audio_path")]
+    audio_path: PathBuf,
+
+    #[arg(long, env = "check_paths")]
+    check_paths: bool,
+}
+
+#[tracing::instrument(skip(args))]
+pub async fn run(args: DaemonArgs) -> Result<(), eyre::Error> {
     let hid = new_hidapi().context("Failed to create HIDAPI")?;
     let devices = list_devices_async(&hid);
     info!("Found {} devices", devices.len());
@@ -37,11 +51,12 @@ pub async fn run() -> Result<(), eyre::Error> {
     device.clear_all_button_images().await?;
 
     let config = Arc::new(
-        tokio::task::spawn_blocking(|| {
-            crate::import::run_sync(ImportArgs {
-                path: env::var("import_path")?.into(),
-                profile_name: env::var("profile_name")?,
-            })
+        tokio::task::spawn_blocking(move || match crate::import::run_sync(args.import.clone()) {
+            Ok(mut config) => {
+                rebase_paths(&args, &mut config)?;
+                Ok(config)
+            }
+            e => e,
         })
         .await??,
     );
@@ -120,6 +135,37 @@ pub async fn run() -> Result<(), eyre::Error> {
         device.set_brightness(15).await?;
     }
 
+    Ok(())
+}
+
+#[instrument(skip_all, level = "DEBUG")]
+fn rebase_paths(args: &DaemonArgs, config: &mut Config) -> eyre::Result<()> {
+    let mut buf = PathBuf::new();
+    for (_, page) in config.pages.iter_mut() {
+        let mut new_page: Page = (**page).clone();
+        for b in new_page.buttons.iter_mut() {
+            if let ButtonBehavior::PlaySound { path } = &mut b.behavior {
+                buf.clear();
+                buf.push(&args.audio_path);
+                buf.push(&**path);
+                if args.check_paths {
+                    match std::fs::metadata(&buf) {
+                        Ok(m) if m.is_file() => (),
+                        Ok(m) => warn!("Path {} is not a file: {:?}", buf.display(), m.file_type()),
+                        Err(e) => warn!("Error checking path {}: {}", buf.display(), e),
+                    }
+                }
+                *path = buf
+                    .to_str()
+                    .with_context(|| {
+                        format!("Rebased path is not valid UTF-8: '{:?}'", buf.display())
+                    })?
+                    .to_string()
+                    .into();
+            }
+        }
+        *page = Arc::new(new_page);
+    }
     Ok(())
 }
 

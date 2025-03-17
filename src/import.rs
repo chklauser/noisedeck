@@ -5,7 +5,7 @@ use crate::import::elgato::{
 };
 use base32::Alphabet;
 use clap::Args;
-use eyre::{Context, OptionExt, ensure};
+use eyre::{Context, ContextCompat, OptionExt, ensure};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
@@ -18,14 +18,18 @@ use zip::ZipArchive;
 
 #[derive(Debug, Eq, PartialEq, Args, Clone)]
 pub struct ImportArgs {
+    #[arg(required = true, env = "import_path")]
     pub path: PathBuf,
-    #[arg(long, required = true)]
+
+    #[arg(long, required = true, env = "base_paths")]
+    pub base_paths: Vec<PathBuf>,
+
+    #[arg(long, required = true, env = "profile_name")]
     pub profile_name: String,
 }
 
 #[tracing::instrument(skip(args))]
-pub(crate) async fn run(args: &ImportArgs) -> eyre::Result<()> {
-    let args = args.clone();
+pub(crate) async fn run(args: ImportArgs) -> eyre::Result<()> {
     _ = tokio::task::spawn_blocking(move || run_sync(args)).await?;
     Ok(())
 }
@@ -39,7 +43,7 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
 
     let mut manifest_paths = parse_manifest_paths(&mut archive)?;
 
-    let selected_profile = find_selected_profile(args, &mut archive, &mut manifest_paths)?;
+    let selected_profile = find_selected_profile(&args, &mut archive, &mut manifest_paths)?;
     info!(
         "Selected profile: {:?} ({} manifests)",
         selected_profile,
@@ -58,6 +62,37 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
             format!("Failed to parse page manifest file {}", &page.manifest_path)
         })?;
         profile_manifests.insert(page.profile_id, manifest);
+    }
+
+    // remove base paths
+    let mut file_path: PathBuf = PathBuf::new();
+    for (id, manifest) in profile_manifests.iter_mut() {
+        for ctrl in manifest.controllers.iter_mut() {
+            for (pos, action) in ctrl.actions.iter_mut() {
+                if let ActionBehavior::PlayAudio { settings } = &mut action.behavior {
+                    file_path.clear();
+                    file_path.push(&*settings.path);
+                    for base_path in &args.base_paths {
+                        if file_path.starts_with(base_path) {
+                            let new_path = file_path
+                                .strip_prefix(base_path)?
+                                .to_str().with_context(|| format!("Stripping a path prefix '{}' from '{}' resulted on non-UTF-8 characters (manifest {}, {:?})",
+                                base_path.display(), settings.path, id, pos))?
+                                .to_string().into();
+                            debug!(
+                                "Removed base path '{}' from '{}' (manifest {}, {:?})",
+                                base_path.display(),
+                                settings.path,
+                                id,
+                                pos
+                            );
+                            settings.path = new_path;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // reverse map profile names
@@ -241,7 +276,7 @@ where
 }
 
 fn find_selected_profile(
-    args: ImportArgs,
+    args: &ImportArgs,
     archive: &mut ZipArchive<File>,
     manifest_paths: &mut Vec<(String, String, Option<String>)>,
 ) -> eyre::Result<ProfileManifestPages> {
