@@ -21,6 +21,7 @@ regex = "1.11.1"
 base32 = "0.5.1"
 uuid = { version = "1.16.0", features = ["serde"] }
 kira = { version = "0.10.4", default-features = false, features = ["cpal", "mp3"] }
+dotenvy = "0.15.7"
 
 [profile.dev.package.kira]
 opt-level = 3

@@ -2,6 +2,7 @@
 
 use crate::import::ImportArgs;
 use clap::{Parser, Subcommand};
+use dotenvy::dotenv;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Debug, Parser)]
@@ -19,11 +20,19 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let no_env_var_file= dotenv();
     tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .init();
     stable_eyre::install()?;
+    if let Err(e) = no_env_var_file {
+        if e.not_found() {
+            tracing::debug!("No .env file found");
+        } else {
+            tracing::debug!("Failed to load .env file: {}", e);
+        }
+    }
 
     let cli = Cli::parse();
     tracing::debug!("Parsed command line arguments {:?}", &cli);
