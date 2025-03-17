@@ -58,9 +58,10 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
         let manifest_file = archive.by_name(&page.manifest_path).with_context(|| {
             format!("Failed to read page manifest file {}", &page.manifest_path)
         })?;
-        let manifest: PageManifest = serde_json::from_reader(manifest_file).with_context(|| {
+        let mut manifest: PageManifest = serde_json::from_reader(manifest_file).with_context(|| {
             format!("Failed to parse page manifest file {}", &page.manifest_path)
         })?;
+        to_os_paths(&mut manifest);
         profile_manifests.insert(page.profile_id, manifest);
     }
 
@@ -158,6 +159,23 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
     };
 
     Ok(c)
+}
+
+// only on non-Windows
+#[cfg(not(target_os = "windows"))]
+fn to_os_paths(manifest: &mut PageManifest) {
+    for ctrl in manifest.controllers.iter_mut() {
+        for (_, action) in ctrl.actions.iter_mut() {
+            if let ActionBehavior::PlayAudio { settings } = &mut action.behavior {
+                settings.path = settings.path.replace('\\', "/").into();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn to_os_paths(_manifest: &mut PageManifest) {
+    // no-op on Windows
 }
 
 fn label_of(action: &Action) -> Arc<String> {
