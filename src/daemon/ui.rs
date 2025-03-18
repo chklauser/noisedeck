@@ -380,7 +380,10 @@ impl NoiseDeck {
             let track_state = track.read().await;
             btn_state.notification = if track_state.playback.is_advancing() {
                 if let Some(remaining) = track_state.rem_duration {
-                    Some(format!("▶️\n{:.1}s", remaining.as_secs_f64()))
+                    let s = remaining.as_secs_f64();
+                    let m = (s / 60.0).floor();
+                    let s = s - m * 60.0;
+                    Some(format!(" {:0.0}:{:.1}", m, s))
                 } else {
                     Some("▶️".to_string())
                 }

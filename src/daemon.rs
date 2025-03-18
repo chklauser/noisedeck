@@ -2,7 +2,9 @@ use crate::config::{ButtonBehavior, Config, Page};
 use crate::daemon::ui::{ButtonData, ButtonRef, UiCommand};
 use crate::import::ImportArgs;
 use clap::Args;
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, Weight};
+use cosmic_text::{
+    Attrs, BorrowedWithFontSystem, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Weight,
+};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
 use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};
@@ -11,6 +13,7 @@ use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
@@ -189,41 +192,80 @@ impl DeckState {
 
     #[instrument(skip(self), level = "TRACE")]
     async fn render_button_image(&mut self, button: &mut ButtonData) -> DynamicImage {
-        let mut image = RgbImage::from_pixel(71, 71, Rgb([0u8, 0u8, 0u8]));
+        let mut bg_color = Rgb([0u8, 0u8, 0u8]);
+        let mut text_color = Rgb([0xFFu8, 0xFFu8, 0xFFu8]);
+        if button.notification.is_some() {
+            std::mem::swap(&mut bg_color, &mut text_color);
+        };
+        let mut image = RgbImage::from_pixel(72, 72, bg_color);
         let metrics = Metrics::new(16.0, 24.0);
+        let text_color = Color::rgb(text_color.0[0], text_color.0[1], text_color.0[2]);
+
+        self.render_text(
+            &mut image,
+            &button.label,
+            metrics,
+            bg_color,
+            text_color,
+            if button.notification.is_some() {
+                Weight::NORMAL
+            } else {
+                Weight::EXTRA_BOLD
+            },
+            72,
+        );
+        if let Some(notification) = &button.notification {
+            self.render_text(
+                &mut image,
+                notification,
+                metrics,
+                bg_color,
+                text_color,
+                Weight::EXTRA_BOLD,
+                32,
+            );
+        }
+
+        image.into()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_text(
+        &mut self,
+        image: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+        text: &str,
+        metrics: Metrics,
+        bg_color: Rgb<u8>,
+        text_color: Color,
+        weight: Weight,
+        height: i32,
+    ) {
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         let mut buffer = buffer.borrow_with(&mut self.font_system);
-        buffer.set_size(Some(72.0), Some(72.0));
+        buffer.set_size(Some(70.0), Some((height - 2) as f32));
         let mut attrs = Attrs::new();
-        attrs.weight = Weight::EXTRA_BOLD;
-        buffer.set_text(
-            button
-                .notification
-                .as_ref()
-                .map(|s| &s[..])
-                .unwrap_or(&button.label),
-            attrs,
-            Shaping::Advanced,
-        );
-        //buffer.set_text("Hello World, fine däy, eh?", attrs, Shaping::Advanced);
+        attrs.weight = weight;
+        buffer.set_text(text, attrs, Shaping::Advanced);
+
         buffer.shape_until_scroll(true);
-        let text_color = cosmic_text::Color::rgb(0xFF, 0xFF, 0xFF);
-        buffer.draw(&mut self.swash_cache, text_color, |x, y, _w, _h, color| {
-            if x < 0 || y < 0 || x >= 71 || y >= 71 {
-                if x < -1 || y < -1 || x > 71 || y > 71 {
+        let swash_cache = &mut self.swash_cache;
+        buffer.draw(swash_cache, text_color, |x, y, _w, _h, color| {
+            let x = x + 1;
+            let y = y + 1 + (72 - height);
+            if x < 0 || y < 0 || x > 71 || y > 71 {
+                if x < -1 || y < -1 || x > 72 || y > 72 {
                     warn!("Out of bounds: x: {}, y: {}", x, y);
                 }
                 return;
             }
             let alpha_f = color.a() as f32 / 255.0;
             let image_color_multiplied_alpha = Rgb([
-                (color.r() as f32 * alpha_f) as u8,
-                (color.g() as f32 * alpha_f) as u8,
-                (color.b() as f32 * alpha_f) as u8,
+                (color.r() as f32 * alpha_f + bg_color.0[0] as f32 * (1.0 - alpha_f)) as u8,
+                (color.g() as f32 * alpha_f + bg_color.0[1] as f32 * (1.0 - alpha_f)) as u8,
+                (color.b() as f32 * alpha_f + bg_color.0[2] as f32 * (1.0 - alpha_f)) as u8,
             ]);
             image.put_pixel(x as u32, y as u32, image_color_multiplied_alpha)
         });
-        image.into()
     }
 
     #[instrument(skip(self), level = "TRACE")]
@@ -277,6 +319,7 @@ impl DeckState {
             }
             UiCommand::Flip(new_page) => {
                 self.page = new_page;
+                // TODO: Some flips are partial; be smarter about clearing cache entries
                 self.render_cache.clear();
                 self.render_cache.extend((0..self.page.len()).map(|_| None));
                 Box::pin(self.handle_command(UiCommand::Refresh)).await?;
