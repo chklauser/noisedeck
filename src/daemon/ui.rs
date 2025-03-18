@@ -197,11 +197,15 @@ impl NoiseDeck {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
 
         // Content
+        let selected_buttons = semantic_buttons
+            .iter()
+            .skip(view.offset)
+            .take(self.geo.n_content)
+            .cloned()
+            .collect::<Vec<_>>();
         page.extend(
-            semantic_buttons
+            selected_buttons
                 .iter()
-                .skip(view.offset)
-                .take(self.geo.n_content)
                 .map(|b| Some(b.clone())),
         );
 
@@ -223,6 +227,8 @@ impl NoiseDeck {
         // Dynamic
         page.extend(self.playing.buttons.iter()
             .skip(self.playing.offset)
+            .chain(self.playing.buttons.iter().take(self.playing.offset))
+            .filter(|b| !selected_buttons.iter().any(|sb| sb == *b))
             .take(self.geo.n_dynamic)
             .map(|b| Some(b.clone()))
             .pad(self.geo.n_dynamic, None));

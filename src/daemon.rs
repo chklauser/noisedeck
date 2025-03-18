@@ -3,7 +3,7 @@ use crate::daemon::ui::{ButtonData, ButtonRef, UiCommand};
 use crate::import::ImportArgs;
 use clap::Args;
 use cosmic_text::{
-    Attrs, BorrowedWithFontSystem, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Weight,
+    Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Weight,
 };
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
@@ -13,7 +13,6 @@ use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
