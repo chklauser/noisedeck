@@ -58,9 +58,10 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
         let manifest_file = archive.by_name(&page.manifest_path).with_context(|| {
             format!("Failed to read page manifest file {}", &page.manifest_path)
         })?;
-        let mut manifest: PageManifest = serde_json::from_reader(manifest_file).with_context(|| {
-            format!("Failed to parse page manifest file {}", &page.manifest_path)
-        })?;
+        let mut manifest: PageManifest =
+            serde_json::from_reader(manifest_file).with_context(|| {
+                format!("Failed to parse page manifest file {}", &page.manifest_path)
+            })?;
         to_os_paths(&mut manifest);
         profile_manifests.insert(page.profile_id, manifest);
     }

@@ -114,7 +114,7 @@ impl PlayingView {
         } else if !playing && currently_in_playing {
             self.buttons.retain(|b| button != b);
             true
-        } else{
+        } else {
             false
         }
     }
@@ -203,11 +203,7 @@ impl NoiseDeck {
             .take(self.geo.n_content)
             .cloned()
             .collect::<Vec<_>>();
-        page.extend(
-            selected_buttons
-                .iter()
-                .map(|b| Some(b.clone())),
-        );
+        page.extend(selected_buttons.iter().map(|b| Some(b.clone())));
 
         // Pad content section
         page.extend(repeat(None).take(self.geo.n_content - page.len()));
@@ -225,13 +221,17 @@ impl NoiseDeck {
         ));
 
         // Dynamic
-        page.extend(self.playing.buttons.iter()
-            .skip(self.playing.offset)
-            .chain(self.playing.buttons.iter().take(self.playing.offset))
-            .filter(|b| !selected_buttons.iter().any(|sb| sb == *b))
-            .take(self.geo.n_dynamic)
-            .map(|b| Some(b.clone()))
-            .pad(self.geo.n_dynamic, None));
+        page.extend(
+            self.playing
+                .buttons
+                .iter()
+                .skip(self.playing.offset)
+                .chain(self.playing.buttons.iter().take(self.playing.offset))
+                .filter(|b| !selected_buttons.iter().any(|sb| sb == *b))
+                .take(self.geo.n_dynamic)
+                .map(|b| Some(b.clone()))
+                .pad(self.geo.n_dynamic, None),
+        );
 
         // Next
         let total_n_pages = semantic_buttons.len() / self.geo.n_content
@@ -399,7 +399,10 @@ impl NoiseDeck {
             drop(btn_state);
 
             // update playing list
-            if self.playing.update_playing(btn, track_state.playback.is_advancing()) {
+            if self
+                .playing
+                .update_playing(btn, track_state.playback.is_advancing())
+            {
                 self.display_top_page().await?;
                 false
             } else {
@@ -431,5 +434,5 @@ impl NoiseDeck {
 }
 
 mod iface;
-pub use iface::{UiCommand, UiEvent};
 use crate::util::IterExt;
+pub use iface::{UiCommand, UiEvent};

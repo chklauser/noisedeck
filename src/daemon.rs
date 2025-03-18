@@ -2,9 +2,7 @@ use crate::config::{ButtonBehavior, Config, Page};
 use crate::daemon::ui::{ButtonData, ButtonRef, UiCommand};
 use crate::import::ImportArgs;
 use clap::Args;
-use cosmic_text::{
-    Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Weight,
-};
+use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use elgato_streamdeck::asynchronous::list_devices_async;
 use elgato_streamdeck::info::Kind;
 use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};

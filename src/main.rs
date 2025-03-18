@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
+use crate::daemon::DaemonArgs;
 use crate::import::ImportArgs;
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use tracing_subscriber::fmt::format::FmtSpan;
-use crate::daemon::DaemonArgs;
 
 #[derive(Debug, Parser)]
 #[command(version, about, author)]
@@ -21,7 +21,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let no_env_var_file= dotenv();
+    let no_env_var_file = dotenv();
     tracing_subscriber::FmtSubscriber::builder()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
