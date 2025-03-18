@@ -5,6 +5,7 @@ use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::default::Default;
 use std::iter::repeat;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +34,8 @@ async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
 
 async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
     let geo = deck.geo;
+
+    // tracks
     let view = deck.current_view()?;
     let page_len = deck.get_library_category(&view.page_id.clone())?.len();
     let view = deck.current_view_mut()?;
@@ -40,6 +43,13 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
     if view.offset >= page_len {
         view.offset = 0;
     }
+
+    // playing
+    deck.playing.offset += geo.n_dynamic;
+    if deck.playing.offset >= deck.playing.buttons.len() {
+        deck.playing.offset = 0;
+    }
+
     deck.display_top_page().await
 }
 
@@ -74,6 +84,7 @@ pub struct NoiseDeck {
     library: HashMap<Uuid, LibraryCategoryState>,
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
     view_stack: Vec<View>,
+    playing: PlayingView,
 }
 
 #[derive(Debug)]
@@ -84,6 +95,28 @@ pub struct View {
 impl View {
     pub fn new(page_id: Uuid) -> Self {
         View { page_id, offset: 0 }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PlayingView {
+    buttons: Vec<ButtonRef>,
+    offset: usize,
+}
+
+impl PlayingView {
+    /// Updates the playing list and indicates whether there was a change.
+    pub fn update_playing(&mut self, button: &ButtonRef, playing: bool) -> bool {
+        let currently_in_playing = self.buttons.contains(button);
+        if playing && !currently_in_playing {
+            self.buttons.push(button.clone());
+            true
+        } else if !playing && currently_in_playing {
+            self.buttons.retain(|b| button != b);
+            true
+        } else{
+            false
+        }
     }
 }
 
@@ -145,6 +178,7 @@ impl NoiseDeck {
             config,
             library: HashMap::new(),
             tracks: HashMap::new(),
+            playing: Default::default(),
         };
         (
             deck,
@@ -187,7 +221,11 @@ impl NoiseDeck {
         ));
 
         // Dynamic
-        page.extend(repeat(None).take(self.geo.n_dynamic));
+        page.extend(self.playing.buttons.iter()
+            .skip(self.playing.offset)
+            .take(self.geo.n_dynamic)
+            .map(|b| Some(b.clone()))
+            .pad(self.geo.n_dynamic, None));
 
         // Next
         let total_n_pages = semantic_buttons.len() / self.geo.n_content
@@ -337,19 +375,32 @@ impl NoiseDeck {
             warn!("Track state changed for unknown track {:?}", track);
             return Ok(());
         };
-        let mut btn_state = btn.inner.data.write().await;
-        let track_state = track.read().await;
-        btn_state.notification = if track_state.playback.is_advancing() {
-            if let Some(remaining) = track_state.rem_duration {
-                Some(format!("▶️\n{:.1}s", remaining.as_secs_f64()))
+        let refresh_needed = {
+            let mut btn_state = btn.inner.data.write().await;
+            let track_state = track.read().await;
+            btn_state.notification = if track_state.playback.is_advancing() {
+                if let Some(remaining) = track_state.rem_duration {
+                    Some(format!("▶️\n{:.1}s", remaining.as_secs_f64()))
+                } else {
+                    Some("▶️".to_string())
+                }
             } else {
-                Some("▶️".to_string())
+                None
+            };
+            drop(btn_state);
+
+            // update playing list
+            if self.playing.update_playing(btn, track_state.playback.is_advancing()) {
+                self.display_top_page().await?;
+                false
+            } else {
+                true
             }
-        } else {
-            None
         };
-        drop(btn_state);
-        self.ui_command_tx.send(UiCommand::Refresh).await?;
+
+        if refresh_needed {
+            self.ui_command_tx.send(UiCommand::Refresh).await?;
+        }
         Ok(())
     }
 
@@ -372,3 +423,4 @@ impl NoiseDeck {
 
 mod iface;
 pub use iface::{UiCommand, UiEvent};
+use crate::util::IterExt;
