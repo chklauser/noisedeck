@@ -32,6 +32,11 @@ async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
     deck.display_top_page().await
 }
 
+async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
+    deck.view_stack.clear();
+    btn_push(deck, id).await
+}
+
 async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
     let geo = deck.geo;
 
@@ -227,6 +232,7 @@ impl NoiseDeck {
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::Pop)
+                .on_hold(ButtonBehavior::Goto(self.config.start_page))
                 .build()
                 .into(),
         ));

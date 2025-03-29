@@ -1,6 +1,6 @@
 use crate::daemon::audio::Track;
 use crate::daemon::ui::{
-    ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push, btn_reset_offset, btn_rotate,
+    ButtonData, NoiseDeck, btn_goto, btn_play_stop, btn_pop, btn_push, btn_reset_offset, btn_rotate,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -34,6 +34,7 @@ pub(in crate::daemon::ui) enum ButtonBehavior {
     Push(Uuid),
     PlayStop,
     Pop,
+    Goto(Uuid),
     Rotate,
     ResetOffset,
 }
@@ -50,6 +51,9 @@ impl ButtonBehavior {
             }
             ButtonBehavior::Push(id) => {
                 btn_push(deck, *id).await?;
+            }
+            ButtonBehavior::Goto(id) => {
+                btn_goto(deck, *id).await?;
             }
             ButtonBehavior::PlayStop => {
                 if let Some(track) = &button.track {
