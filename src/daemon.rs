@@ -9,10 +9,12 @@ use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};
 use eyre::{Context, ContextCompat, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
+use std::future::pending;
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::Instant;
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval, sleep_until};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
@@ -86,7 +88,25 @@ pub async fn run(args: DaemonArgs) -> Result<(), eyre::Error> {
     tokio::pin!(sigint);
 
     'infinite: loop {
+        let active_timeout = state
+            .buttons_held
+            .iter()
+            .map(|(_, at)| at)
+            .min()
+            .map(|earliest| sleep_until(*earliest + HOLD_TIME));
         tokio::select! {
+            _ = async { active_timeout.unwrap().await }, if active_timeout.is_some() => {
+                debug!("Hold timeout reached");
+                let now = Instant::now();
+                while let Some(i) = state.buttons_held.iter().position(|(_, pressed_at)| now.duration_since(*pressed_at) >= HOLD_TIME){
+                    let (b, _) = state.buttons_held.swap_remove(i);
+                    if state.page.iter().any(|ob| ob.as_ref().is_some_and(|page_b| *page_b == b)) {
+                        state.event_tx.send(ui::UiEvent::ButtonHold(b)).await?;
+                    } else {
+                        warn!("held button {:?} no longer found in page", b);
+                    }
+                }
+            },
             updates_result = reader.read(100.0) => {
                 let updates = updates_result.context("Failed to read updates")?;
                 match state.handle_updates(updates).await {
@@ -320,6 +340,7 @@ impl DeckState {
             }
             UiCommand::Flip(new_page) => {
                 self.page = new_page;
+                self.buttons_held.clear();
                 // TODO: Some flips are partial; be smarter about clearing cache entries
                 self.render_cache.clear();
                 self.render_cache.extend((0..self.page.len()).map(|_| None));
@@ -355,15 +376,16 @@ impl DeckState {
                             let (_, pressed_at) = self.buttons_held.swap_remove(pos);
                             now - pressed_at
                         } else {
-                            Duration::ZERO
+                            Duration::MAX
                         };
-                        self.event_tx
-                            .send(if duration > HOLD_TIME {
-                                ui::UiEvent::ButtonHold(button)
-                            } else {
-                                ui::UiEvent::ButtonTap(button)
-                            })
-                            .await?;
+                        if duration > HOLD_TIME {
+                            debug!(
+                                "Button {} held for {:?}, should have triggered via timeout or was tapped before flip",
+                                key, duration
+                            );
+                        } else {
+                            self.event_tx.send(ui::UiEvent::ButtonTap(button)).await?;
+                        }
                     } else {
                         warn!("Button {} not found", key);
                     }

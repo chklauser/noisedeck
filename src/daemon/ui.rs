@@ -265,7 +265,11 @@ impl NoiseDeck {
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::Rotate)
-                .on_hold(ButtonBehavior::Rotate)
+                .on_hold(if view.offset == 0 && self.playing.offset == 0 {
+                    ButtonBehavior::Rotate
+                } else {
+                    ButtonBehavior::ResetOffset
+                })
                 .build()
                 .into(),
         ));
