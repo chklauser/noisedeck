@@ -11,6 +11,8 @@ use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
@@ -76,6 +78,7 @@ pub async fn run(args: DaemonArgs) -> Result<(), eyre::Error> {
         swash_cache,
         device,
         event_tx: ui_event_tx,
+        buttons_held: vec![],
     };
 
     let reader = state.device.get_reader();
@@ -180,6 +183,7 @@ struct DeckState {
     swash_cache: SwashCache,
     device: AsyncStreamDeck,
     event_tx: tokio::sync::mpsc::Sender<ui::UiEvent>,
+    buttons_held: Vec<(ButtonRef, Instant)>,
 }
 
 impl DeckState {
@@ -335,11 +339,31 @@ impl DeckState {
             match update {
                 DeviceStateUpdate::ButtonDown(key) => {
                     info!("Button {} down", key);
+                    if let Some(button) = self.button_by_key(key)? {
+                        self.buttons_held.push((button, Instant::now()));
+                    } else {
+                        warn!("Button {} not found", key);
+                    }
                 }
                 DeviceStateUpdate::ButtonUp(key) => {
                     info!("Button {} up", key);
                     if let Some(button) = self.button_by_key(key)? {
-                        self.event_tx.send(ui::UiEvent::ButtonTap(button)).await?;
+                        let now = Instant::now();
+                        let duration = if let Some(pos) =
+                            self.buttons_held.iter().position(|(b, _)| b == &button)
+                        {
+                            let (_, pressed_at) = self.buttons_held.swap_remove(pos);
+                            now - pressed_at
+                        } else {
+                            Duration::ZERO
+                        };
+                        self.event_tx
+                            .send(if duration > HOLD_TIME {
+                                ui::UiEvent::ButtonHold(button)
+                            } else {
+                                ui::UiEvent::ButtonTap(button)
+                            })
+                            .await?;
                     } else {
                         warn!("Button {} not found", key);
                     }
@@ -352,6 +376,8 @@ impl DeckState {
         Ok(())
     }
 }
+
+const HOLD_TIME: Duration = Duration::from_millis(250);
 
 #[tracing::instrument(level = tracing::Level::DEBUG)]
 async fn load_fonts() -> eyre::Result<FontSystem> {

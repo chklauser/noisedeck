@@ -53,6 +53,17 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
     deck.display_top_page().await
 }
 
+async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<()> {
+    // tracks
+    let view = deck.current_view_mut()?;
+    view.offset = 0;
+
+    // playing
+    deck.playing.offset = 0;
+
+    deck.display_top_page().await
+}
+
 async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
     let state = track.read().await;
     let track = track.clone();
@@ -248,6 +259,7 @@ impl NoiseDeck {
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::Rotate)
+                .on_hold(ButtonBehavior::Rotate)
                 .build()
                 .into(),
         ));
@@ -352,6 +364,11 @@ impl NoiseDeck {
                                 warn!(error = %e, "Error handling button tap event");
                             }
                         }
+                        Some(UiEvent::ButtonHold(button)) => {
+                            if let Err(e) = self.handle_button_hold(&button).await {
+                                warn!(error = %e, "Error handling button hold event");
+                            }
+                        }
                         None => {
                             info!("Event channel closed, shutting down");
                             break;
@@ -422,6 +439,22 @@ impl NoiseDeck {
             {
                 let mut button_guard = button.inner.data.write().await;
                 on_tap
+                    .invoke(self, &button.inner, &mut button_guard)
+                    .await?;
+            }
+            self.ui_command_tx.send(UiCommand::Refresh).await?;
+        } else {
+            debug!("Button tap event received, but no handler set");
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self), level = "trace")]
+    async fn handle_button_hold(&mut self, button: &ButtonRef) -> eyre::Result<()> {
+        if let Some(on_hold) = button.inner.on_hold.as_ref() {
+            {
+                let mut button_guard = button.inner.data.write().await;
+                on_hold
                     .invoke(self, &button.inner, &mut button_guard)
                     .await?;
             }

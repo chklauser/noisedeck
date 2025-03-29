@@ -3,6 +3,7 @@ use crate::daemon::ui::ButtonRef;
 #[derive(Debug)]
 pub enum UiEvent {
     ButtonTap(ButtonRef),
+    ButtonHold(ButtonRef),
 }
 
 pub enum UiCommand {

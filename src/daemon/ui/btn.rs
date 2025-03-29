@@ -1,5 +1,7 @@
 use crate::daemon::audio::Track;
-use crate::daemon::ui::{ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push, btn_rotate};
+use crate::daemon::ui::{
+    ButtonData, NoiseDeck, btn_play_stop, btn_pop, btn_push, btn_reset_offset, btn_rotate,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
@@ -10,6 +12,7 @@ pub struct Button {
     pub(in crate::daemon::ui) data: tokio::sync::RwLock<ButtonData>,
     pub(in crate::daemon::ui) track: Option<Arc<Track>>,
     pub(in crate::daemon::ui) on_tap: Option<ButtonBehavior>,
+    pub(in crate::daemon::ui) on_hold: Option<ButtonBehavior>,
 }
 impl Button {
     pub(in crate::daemon::ui) fn builder() -> ButtonBuilder {
@@ -32,6 +35,7 @@ pub(in crate::daemon::ui) enum ButtonBehavior {
     PlayStop,
     Pop,
     Rotate,
+    ResetOffset,
 }
 impl ButtonBehavior {
     pub(in crate::daemon::ui) async fn invoke(
@@ -57,6 +61,9 @@ impl ButtonBehavior {
             ButtonBehavior::Rotate => {
                 btn_rotate(deck).await?;
             }
+            ButtonBehavior::ResetOffset => {
+                btn_reset_offset(deck).await?;
+            }
         }
         Ok(())
     }
@@ -65,6 +72,11 @@ impl ButtonBehavior {
 impl ButtonBuilder {
     pub fn on_tap(mut self, behavior: ButtonBehavior) -> Self {
         self.inner.on_tap = Some(behavior);
+        self
+    }
+
+    pub fn on_hold(mut self, behavior: ButtonBehavior) -> Self {
+        self.inner.on_hold = Some(behavior);
         self
     }
 
