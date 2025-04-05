@@ -264,7 +264,7 @@ impl DeckState {
         buffer.set_size(Some(70.0), Some((height - 2) as f32));
         let mut attrs = Attrs::new();
         attrs.weight = weight;
-        buffer.set_text(text, attrs, Shaping::Advanced);
+        buffer.set_text(text, &attrs, Shaping::Advanced);
 
         buffer.shape_until_scroll(true);
         let swash_cache = &mut self.swash_cache;

@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.35", default-features = false, features = ["error-context", "help", "std", "suggestions", "usage", "cargo", "derive", "env", "unicode", "wrap_help"] }
-cosmic-text = "0.12.1"
+cosmic-text = "0.14.1"
 elgato-streamdeck = { version = "0.9.2", features = ["async"] }
 eyre = "0.6.12"
 image = { version = "0.25.6", default-features = false, features = ["bmp", "jpeg", "png"] }
