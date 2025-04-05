@@ -42,9 +42,12 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
 
     // tracks
     let view = deck.current_view()?;
-    let page_len = deck.get_library_category(&view.page_id.clone())?.len();
+    let page = deck.get_library_category(&view.page_id.clone())?.to_vec();
+    let page_len = page.len();
+    let view = deck.current_view()?;
+    let (_, n_displayed) = deck.layout_page(&page, view);
     let view = deck.current_view_mut()?;
-    view.offset += geo.n_content;
+    view.offset += geo.n_content.max(n_displayed);
     if view.offset >= page_len {
         view.offset = 0;
     }
@@ -209,20 +212,23 @@ impl NoiseDeck {
         self.display_top_page().await
     }
 
-    fn layout_page(&self, semantic_buttons: &[ButtonRef], view: &View) -> Vec<Option<ButtonRef>> {
+    fn layout_page(
+        &self,
+        semantic_buttons: &[ButtonRef],
+        view: &View,
+    ) -> (Vec<Option<ButtonRef>>, usize) {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
 
-        // Content
-        let selected_buttons = semantic_buttons
-            .iter()
-            .skip(view.offset)
-            .take(self.geo.n_content)
-            .cloned()
-            .collect::<Vec<_>>();
-        page.extend(selected_buttons.iter().map(|b| Some(b.clone())));
-
-        // Pad content section
-        page.extend(repeat(None).take(self.geo.n_content - page.len()));
+        // Content (use skip and take for more resilience against out of bounds offsets
+        let mut n_selected_buttons = 0usize;
+        page.extend(
+            semantic_buttons
+                .iter()
+                .skip(view.offset)
+                .take(self.geo.n_content)
+                .map(|b| Some(b.clone()))
+                .pad_alt_cnt(self.geo.n_content, repeat(None), &mut n_selected_buttons),
+        );
 
         // Back
         page.push(Some(
@@ -238,21 +244,49 @@ impl NoiseDeck {
         ));
 
         // Dynamic
+        let mut effective_n_dyn_buttons = 0usize;
         page.extend(
             self.playing
                 .buttons
                 .iter()
+                // skip is resilient against out of bounds offsets
                 .skip(self.playing.offset)
                 .chain(self.playing.buttons.iter().take(self.playing.offset))
-                .filter(|b| !selected_buttons.iter().any(|sb| sb == *b))
+                .filter(|b| {
+                    !semantic_buttons
+                        .iter()
+                        .skip(view.offset)
+                        .take(n_selected_buttons)
+                        .any(|sb| sb == *b)
+                })
                 .take(self.geo.n_dynamic)
+                .pad_alt_cnt(
+                    self.geo.n_dynamic,
+                    semantic_buttons
+                        .iter()
+                        .skip(view.offset + n_selected_buttons)
+                        .filter(|b| !self.playing.buttons.contains(b)),
+                    &mut effective_n_dyn_buttons,
+                )
                 .map(|b| Some(b.clone()))
                 .pad(self.geo.n_dynamic, None),
         );
+        n_selected_buttons += self
+            .geo
+            .n_dynamic
+            .saturating_sub(effective_n_dyn_buttons)
+            .min(
+                semantic_buttons
+                    .len()
+                    .saturating_sub(view.offset)
+                    .saturating_sub(n_selected_buttons),
+            );
 
         // Next
-        let total_n_pages = semantic_buttons.len() / self.geo.n_content
-            + (if semantic_buttons.len() % self.geo.n_content > 0 {
+        let page_size_estimate =
+            self.geo.n_content + self.geo.n_dynamic.saturating_sub(effective_n_dyn_buttons);
+        let total_n_pages = semantic_buttons.len() / page_size_estimate
+            + (if semantic_buttons.len() % page_size_estimate > 0 {
                 1
             } else {
                 0
@@ -261,7 +295,11 @@ impl NoiseDeck {
         page.push(Some(
             Button::builder()
                 .data(ButtonData {
-                    label: format!("Next\n{current_page}/{total_n_pages}").into(),
+                    label: format!(
+                        "Next\n{current_page}/{total_n_pages}\n{page_size_estimate}/{}",
+                        semantic_buttons.len()
+                    )
+                    .into(),
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::Rotate)
@@ -275,7 +313,7 @@ impl NoiseDeck {
         ));
 
         debug_assert_eq!(page.len(), self.kind.key_count() as usize);
-        page
+        (page, n_selected_buttons)
     }
 
     #[inline]
@@ -296,7 +334,7 @@ impl NoiseDeck {
         let semantic_buttons = self
             .get_library_category(&self.current_view()?.page_id.clone())?
             .to_vec();
-        let physical_buttons = self.layout_page(&semantic_buttons, self.current_view()?);
+        let (physical_buttons, _) = self.layout_page(&semantic_buttons, self.current_view()?);
         self.ui_command_tx
             .send(UiCommand::Flip(physical_buttons))
             .await?;

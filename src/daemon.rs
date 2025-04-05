@@ -9,12 +9,10 @@ use elgato_streamdeck::{AsyncStreamDeck, DeviceStateUpdate, new_hidapi};
 use eyre::{Context, ContextCompat, OptionExt, Report};
 use image::{DynamicImage, ImageBuffer, Rgb};
 use imageproc::image::RgbImage;
-use std::future::pending;
 use std::path::PathBuf;
-use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{Instant, Interval, MissedTickBehavior, interval, sleep_until};
+use tokio::time::{Instant, sleep_until};
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod audio;
