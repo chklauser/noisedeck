@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.32", default-features = false, features = ["error-context", "help", "std", "suggestions", "usage", "cargo", "derive", "env", "unicode", "wrap_help"] }
+clap = { version = "4.5.35", default-features = false, features = ["error-context", "help", "std", "suggestions", "usage", "cargo", "derive", "env", "unicode", "wrap_help"] }
 cosmic-text = "0.12.1"
 elgato-streamdeck = { version = "0.9.2", features = ["async"] }
 eyre = "0.6.12"
-image = { version = "0.25.5", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25.6", default-features = false, features = ["bmp", "jpeg", "png"] }
 imageproc = { version = "0.25.0", default-features = false }
 serde_json = "1.0.140"
 stable-eyre = "0.2.2"
@@ -16,7 +16,7 @@ tokio = { version = "1.44.1", default-features = false, features = ["rt", "rt-mu
 tracing = { version = "0.1.41", default-features = false, features = ["async-await", "attributes", "max_level_trace", "release_max_level_debug", "std"] }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["std", "env-filter", "fmt", "registry"] }
 serde = { version = "1.0.219", features = ["derive", "rc"] }
-zip = { version = "2.4.0", default-features = false, features = ["deflate"] }
+zip = { version = "2.6.1", default-features = false, features = ["deflate"] }
 regex = "1.11.1"
 base32 = "0.5.1"
 uuid = { version = "1.16.0", features = ["serde"] }

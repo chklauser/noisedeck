@@ -78,6 +78,14 @@ pub struct AudioSettings {
     pub fade_length: Option<u32>,
     pub volume: u8,
     pub path: Arc<String>,
+    // action: 0 -> play/stop
+    // action: 1 -> play/overlap
+    // action: 2 -> play/restart
+    // action: 3 -> loop/stop
+    // fade: 0 -> no fade
+    // fade: 1 -> fade in
+    // fade: 2 -> fade out
+    // fade: 3 -> fade in/out
 }
 
 #[derive(Deserialize, Debug)]
