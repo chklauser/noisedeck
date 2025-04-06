@@ -1,5 +1,5 @@
 use crate::config;
-use crate::config::Config;
+use crate::config::{Config};
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
@@ -361,13 +361,13 @@ impl NoiseDeck {
                         .on_tap(ButtonBehavior::Push(*id))
                         .build()
                         .into(),
-                    config::ButtonBehavior::PlaySound { path } => Button::builder()
+                    config::ButtonBehavior::PlaySound(path, settings) => Button::builder()
                         .data(ButtonData {
                             label: b.label.clone(),
                             ..Default::default()
                         })
                         .on_tap(ButtonBehavior::PlayStop)
-                        .track(Arc::new(PathBuf::from(&path[..])))
+                        .track(Arc::new(PathBuf::from(&path[..])), settings)
                         .build()
                         .into(),
                 })

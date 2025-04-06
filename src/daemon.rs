@@ -165,7 +165,7 @@ fn rebase_paths(args: &DaemonArgs, config: &mut Config) -> eyre::Result<()> {
     for (_, page) in config.pages.iter_mut() {
         let mut new_page: Page = (**page).clone();
         for b in new_page.buttons.iter_mut() {
-            if let ButtonBehavior::PlaySound { path } = &mut b.behavior {
+            if let ButtonBehavior::PlaySound(path,_) = &mut b.behavior {
                 buf.clear();
                 buf.push(&args.audio_path);
                 buf.push(&**path);

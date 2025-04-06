@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use uuid::Uuid;
+use crate::config::PlaySoundSettings;
 
 #[derive(Default)]
 pub struct Button {
@@ -89,8 +90,8 @@ impl ButtonBuilder {
         self
     }
 
-    pub fn track(mut self, track_path: Arc<PathBuf>) -> Self {
-        self.inner.track = Some(Arc::new(Track::new(track_path)));
+    pub fn track(mut self, track_path: Arc<PathBuf>, settings: &PlaySoundSettings) -> Self {
+        self.inner.track = Some(Arc::new(Track::new(track_path, settings.clone())));
         self
     }
 

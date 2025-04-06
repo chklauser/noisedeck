@@ -1,8 +1,6 @@
 use crate::config;
-use crate::config::Config;
-use crate::import::elgato::{
-    Action, ActionBehavior, PageManifest, ProfileManifest, ProfileManifestPages,
-};
+use crate::config::{Config, PlaySoundSettings, PlaybackMode};
+use crate::import::elgato::{Action, ActionBehavior, AudioActionType, PageManifest, ProfileManifest, ProfileManifestPages};
 use base32::Alphabet;
 use clap::Args;
 use eyre::{Context, ContextCompat, OptionExt, ensure};
@@ -12,6 +10,7 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, OnceLock};
+use std::time::Duration;
 use tracing::{debug, info};
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -129,11 +128,20 @@ pub(crate) fn run_sync(args: ImportArgs) -> eyre::Result<Config> {
             match &action.behavior {
                 ActionBehavior::BackToParent => {}
                 ActionBehavior::PlayAudio { settings } => {
+                    let fade_len = Duration::from_secs(settings.fade_len.into());
                     buttons.push(config::Button {
                         label: label_of(action),
-                        behavior: config::ButtonBehavior::PlaySound {
-                            path: settings.path.clone(),
-                        },
+                        behavior: config::ButtonBehavior::PlaySound(settings.path.clone(), PlaySoundSettings {
+                            fade_in: settings.fade_type.when_in(fade_len),
+                            fade_out: settings.fade_type.when_out(fade_len),
+                            volume: settings.volume as f64 / 50.0, // 50% is the default volume,
+                            mode: match settings.action_type {
+                                AudioActionType::PlayStop => PlaybackMode::PlayStop,
+                                AudioActionType::PlayOverlap => PlaybackMode::PlayOverlap,
+                                AudioActionType::PlayRestart => PlaybackMode::PlayStop,
+                                AudioActionType::LoopStop => PlaybackMode::LoopStop,
+                            }
+                        }),
                     });
                 }
                 ActionBehavior::OpenChild { settings } => buttons.push(config::Button {

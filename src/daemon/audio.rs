@@ -11,9 +11,11 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, instrument, trace};
+use crate::config::PlaySoundSettings;
 
 pub struct Track {
     pub path: Arc<PathBuf>,
+    pub settings: PlaySoundSettings,
     state: Mutex<TrackState>,
 }
 
@@ -24,9 +26,10 @@ impl std::fmt::Debug for Track {
 }
 
 impl Track {
-    pub fn new(path: Arc<PathBuf>) -> Self {
+    pub fn new(path: Arc<PathBuf>, settings: PlaySoundSettings) -> Self {
         Track {
             path,
+            settings,
             state: Mutex::default(),
         }
     }
@@ -109,13 +112,13 @@ impl AudioState {
 
     #[instrument(skip_all, level = "debug")]
     fn play(&mut self, track: Arc<Track>) -> eyre::Result<()> {
-        if self.tracks.iter().any(|t| Arc::ptr_eq(&track, t)) {
+        if !track.settings.mode.overlaps() && self.tracks.iter().any(|t| Arc::ptr_eq(&track, t)) {
             info!("Track {:?} already playing, not changing anything", &track);
             return Ok(());
         }
 
         let mut track_state_guard = track.state.blocking_lock();
-        let sound_data =
+        let mut sound_data =
             StreamingSoundData::from_file(track.path.as_path()).with_context(|| {
                 format!(
                     "Failed to load sound data from path {}",
@@ -123,16 +126,19 @@ impl AudioState {
                 )
             })?;
         let total_duration = sound_data.duration();
-        let sound_data = sound_data.fade_in_tween(Tween {
-            duration: Duration::from_millis(2000),
+        if let Some(fade_in) = track.settings.fade_in {
+        sound_data = sound_data.fade_in_tween(Tween {
+            duration: fade_in,
             easing: Easing::OutPowi(2),
             ..Default::default()
-        });
+        });}
         let mut track_handle = self
             .manager
             .play(sound_data)
             .with_context(|| format!("Failed to play {:?}", &track.path))?;
-        track_handle.set_loop_region(..);
+        if track.settings.mode.loops() {
+            track_handle.set_loop_region(..);
+        }
 
         track_state_guard.sink = Some(track_handle);
         track_state_guard.duration = Some(total_duration);
@@ -224,8 +230,21 @@ fn run_sync(
                 update_track_state(track, &state.event_tx)?
             }
             BlockingAudioCommand::UpdateState => {
-                for track in state.tracks.iter() {
-                    update_track_state(track.clone(), &state.event_tx)?
+                let mut idx_to_remove = Vec::new();
+                for (idx,track) in state.tracks.iter().enumerate() {
+                    let state_guard = track.state.blocking_lock();
+                    if let Some(sink) = &state_guard.sink {
+                        if sink.state() == PlaybackState::Stopped {
+                            idx_to_remove.push(idx);
+                        } 
+                    }
+                    drop(state_guard);
+                    update_track_state(track.clone(), &state.event_tx)?;
+                }
+                
+                // swap remove is only safe in reverse order (idx_to_remove is sorted asc)
+                for idx in idx_to_remove.into_iter().rev() {
+                    state.tracks.swap_remove(idx);
                 }
             }
         }

@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use serde_repr::Deserialize_repr;
 use uuid::Uuid;
 
 #[derive(Deserialize, Debug)]
@@ -75,17 +76,49 @@ pub struct OpenChildSettings {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
-    pub fade_length: Option<u32>,
+    #[serde(default)]
+    pub fade_len: u32,
     pub volume: u8,
     pub path: Arc<String>,
-    // action: 0 -> play/stop
-    // action: 1 -> play/overlap
-    // action: 2 -> play/restart
-    // action: 3 -> loop/stop
-    // fade: 0 -> no fade
-    // fade: 1 -> fade in
-    // fade: 2 -> fade out
-    // fade: 3 -> fade in/out
+    #[serde(default)]
+    pub action_type: AudioActionType,
+    #[serde(default)]
+    pub fade_type: FadeType,
+}
+
+#[derive(Deserialize_repr, Debug, Default)]
+#[repr(u8)]
+pub enum AudioActionType {
+    #[default]
+    PlayStop = 0,
+    PlayOverlap = 1,
+    PlayRestart = 2,
+    LoopStop = 3,
+}
+
+#[derive(Debug, Deserialize_repr, Default)]
+#[repr(u8)]
+pub enum FadeType {
+    #[default]
+    None = 0,
+    In = 1,
+    Out = 2,
+    InOut = 3,
+}
+impl FadeType {
+    pub fn when_in<T>(&self, value: T) -> Option<T> {
+        match self {
+            FadeType::In | FadeType::InOut => Some(value),
+            FadeType::Out | FadeType::None => None,
+        }
+    }
+    
+    pub fn when_out<T>(&self, value: T) -> Option<T> {
+        match self {
+            FadeType::Out | FadeType::InOut => Some(value),
+            FadeType::In | FadeType::None => None,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]

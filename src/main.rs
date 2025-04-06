@@ -61,6 +61,7 @@ mod config {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -82,8 +83,33 @@ mod config {
     }
 
     #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct PlaySoundSettings {
+        pub volume: f64,
+        pub mode: PlaybackMode,
+        pub fade_in: Option<Duration>,
+        pub fade_out: Option<Duration>
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone)]
     pub enum ButtonBehavior {
         PushPage(Uuid),
-        PlaySound { path: Arc<String> },
+        PlaySound(Arc<String>, PlaySoundSettings),
+    }
+    
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub enum PlaybackMode {
+        PlayStop,
+        PlayOverlap,
+        LoopStop,
+    }
+    
+    impl PlaybackMode {
+        pub fn loops(&self) -> bool {
+            matches!(self, PlaybackMode::LoopStop)
+        }
+        
+        pub fn overlaps(&self) -> bool {
+            matches!(self, PlaybackMode::PlayOverlap)
+        }
     }
 }
