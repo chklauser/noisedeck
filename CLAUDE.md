@@ -33,7 +33,9 @@ The application is built with a three-component architecture that communicates v
 
 ## Technology Stack
 
-- **Language**: Rust (2024 edition)
+- **Language**: Rust (2024 edition) with at least Rust 1.87.0
+  - support for `async |closure|` syntax
+  - support for `+ use<..>` syntax
 - **Async Runtime**: Tokio
 - **Audio**: Kira (with cpal backend, MP3 support)
 - **Hardware**: elgato-streamdeck crate
@@ -147,3 +149,4 @@ src/
 - If some values have special meaning (true, false, zero, negative numbers), that's worth mentioning in a comment.
 - Prefer standard Rust language features (traits, generics, dyn) over macros whenever possible
 - Macros are allowed as a solution, but their scope should be kept minimal (as in: the macro arguments should contain as little code as possible). Reason: the editor experience inside macro arguments is not great. Less code within macros results in a better editing experience.
+- Where possible, prefer async closures `async |x| {}` over `|x| async move {}`

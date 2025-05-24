@@ -1,9 +1,22 @@
-use super::*;
-use crate::config::{ButtonBehavior, PlaySoundSettings, PlaybackMode};
+//! Testing harness for the `daemon::ui` test suite.
+//!
+//! Don't add tests here. Add tests in the `daemon::ui` module instead.
+
+use crate::{
+    config::{self, ButtonBehavior, Config, PlaySoundSettings, PlaybackMode},
+    daemon::{
+        audio::{AudioCommand, AudioEvent},
+        ui::{ButtonRef, NoiseDeck, UiCommand, UiEvent},
+    },
+};
 use assert_matches::assert_matches;
 use elgato_streamdeck::info::Kind;
-use std::time::Duration;
-use tokio::time::timeout;
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    time::timeout,
+};
+use uuid::Uuid;
 
 pub const NAV_BUTTON_LABEL: &str = "Go to Target";
 pub const BACK_BUTTON_LABEL: &str = "Back";
@@ -13,13 +26,14 @@ pub struct TestHarness {
     pub ui_event_tx: Sender<UiEvent>,
     pub ui_command_rx: Receiver<UiCommand>,
     pub audio_command_rx: Receiver<AudioCommand>,
+    pub audio_event_tx: Sender<AudioEvent>,
     pub deck_handle: tokio::task::JoinHandle<eyre::Result<()>>,
     pub current_buttons: Vec<Option<ButtonRef>>,
 }
 
 impl TestHarness {
     async fn new() -> eyre::Result<Self> {
-        let (mut deck, ui_event_tx, mut ui_command_rx, _audio_event_tx, audio_command_rx) = {
+        let (mut deck, ui_event_tx, mut ui_command_rx, audio_event_tx, audio_command_rx) = {
             let config = create_test_config();
             NoiseDeck::new(Kind::Mk2, config)
         };
@@ -47,6 +61,7 @@ impl TestHarness {
             ui_event_tx,
             ui_command_rx,
             audio_command_rx,
+            audio_event_tx,
             deck_handle,
             current_buttons,
         })
@@ -112,6 +127,30 @@ impl TestHarness {
     pub async fn expect_no_audio_commands(&mut self) -> eyre::Result<()> {
         let result = timeout(Duration::from_millis(50), self.audio_command_rx.recv()).await;
         assert_matches!(result, Err(_)); // Timeout is expected - no commands
+        Ok(())
+    }
+
+    pub async fn simulate_track_state_changed(&mut self, sound_path: &str) -> eyre::Result<()> {
+        use crate::daemon::audio::{AudioEvent, Track};
+        use std::path::PathBuf;
+
+        let track = Arc::new(Track::new(
+            Arc::new(PathBuf::from(sound_path)),
+            PlaySoundSettings {
+                volume: 0.8,
+                mode: PlaybackMode::PlayStop,
+                fade_in: Some(Duration::from_millis(100)),
+                fade_out: Some(Duration::from_millis(100)),
+            },
+        ));
+
+        // Send the track state changed event
+        // The UI will call track.read() to get the current state
+        // Since we can't mock the internal StreamingSoundHandle,
+        // the track will appear as stopped (default state)
+        self.audio_event_tx
+            .send(AudioEvent::TrackStateChanged(track))
+            .await?;
         Ok(())
     }
 

@@ -551,12 +551,14 @@ pub use iface::{UiCommand, UiEvent};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::daemon::audio::AudioCommand;
     use assert_matches::assert_matches;
-
-    mod harness;
-
     use harness::{BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL, with_test_harness};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // Test support code goes into the harness module. Actual tests go here.
+    mod harness;
 
     #[tokio::test]
     async fn test_back_button_navigation() -> eyre::Result<()> {
@@ -605,6 +607,110 @@ mod tests {
             let audio_command = harness.expect_audio_command().await?;
             assert_matches!(audio_command, crate::daemon::audio::AudioCommand::Play(_));
             harness.expect_refresh().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_audio_feedback_triggers_refresh_for_known_track() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to target page and tap sound button to register the track
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+
+            // Simulate track state change - should trigger a refresh since the track is now known
+            harness
+                .simulate_track_state_changed("test_sound.mp3")
+                .await?;
+            harness.expect_refresh().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_audio_feedback_playing_view_interaction() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to target page and tap sound button
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+
+            // Now navigate to playing view (if it exists) or stay on current page
+            // The key test is that audio feedback should work regardless of current page
+
+            // Simulate track state change - should trigger appropriate UI update
+            harness
+                .simulate_track_state_changed("test_sound.mp3")
+                .await?;
+
+            // Should receive a Refresh command since the track appears as stopped (default state)
+            harness.expect_refresh().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_audio_feedback_multiple_state_changes() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to target page and tap sound button
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+
+            // Multiple track state changes should each trigger a refresh
+            harness
+                .simulate_track_state_changed("test_sound.mp3")
+                .await?;
+            harness.expect_refresh().await?;
+
+            harness
+                .simulate_track_state_changed("test_sound.mp3")
+                .await?;
+            harness.expect_refresh().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_audio_feedback_unknown_track_ignored() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Start on main page - don't play any sounds
+
+            // Simulate track state change for unknown track - should not trigger any UI commands
+            harness
+                .simulate_track_state_changed("unknown_sound.mp3")
+                .await?;
+
+            // Should not receive any UI commands
+            let result = timeout(Duration::from_millis(50), harness.ui_command_rx.recv()).await;
+            assert_matches!(result, Err(_)); // Timeout is expected - no commands
 
             Ok(())
         })
