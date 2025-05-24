@@ -78,6 +78,7 @@ pub enum AudioEvent {
     TrackStateChanged(Arc<Track>),
 }
 
+#[derive(Debug)]
 pub enum AudioCommand {
     Play(Arc<Track>),
     Stop(Arc<Track>),
