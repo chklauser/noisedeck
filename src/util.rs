@@ -98,7 +98,7 @@ where
     }
 }
 
-impl<'a, I1, I2> Iterator for PadAlternateIter<'a, I1, I2>
+impl<I1, I2> Iterator for PadAlternateIter<'_, I1, I2>
 where
     I1: Iterator,
     I2: Iterator<Item = I1::Item>,

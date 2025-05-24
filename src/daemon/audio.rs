@@ -1,3 +1,4 @@
+use crate::config::PlaySoundSettings;
 use crate::daemon::audio::BlockingAudioCommand::AsyncCommand;
 use eyre::Context;
 use kira::effect::volume_control::VolumeControlHandle;
@@ -11,7 +12,6 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, instrument, trace};
-use crate::config::PlaySoundSettings;
 
 pub struct Track {
     pub path: Arc<PathBuf>,
@@ -128,11 +128,12 @@ impl AudioState {
             })?;
         let total_duration = sound_data.duration();
         if let Some(fade_in) = track.settings.fade_in {
-        sound_data = sound_data.fade_in_tween(Tween {
-            duration: fade_in,
-            easing: Easing::OutPowi(2),
-            ..Default::default()
-        });}
+            sound_data = sound_data.fade_in_tween(Tween {
+                duration: fade_in,
+                easing: Easing::OutPowi(2),
+                ..Default::default()
+            });
+        }
         let mut track_handle = self
             .manager
             .play(sound_data)
@@ -232,17 +233,17 @@ fn run_sync(
             }
             BlockingAudioCommand::UpdateState => {
                 let mut idx_to_remove = Vec::new();
-                for (idx,track) in state.tracks.iter().enumerate() {
+                for (idx, track) in state.tracks.iter().enumerate() {
                     let state_guard = track.state.blocking_lock();
                     if let Some(sink) = &state_guard.sink {
                         if sink.state() == PlaybackState::Stopped {
                             idx_to_remove.push(idx);
-                        } 
+                        }
                     }
                     drop(state_guard);
                     update_track_state(track.clone(), &state.event_tx)?;
                 }
-                
+
                 // swap remove is only safe in reverse order (idx_to_remove is sorted asc)
                 for idx in idx_to_remove.into_iter().rev() {
                     state.tracks.swap_remove(idx);

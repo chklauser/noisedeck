@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 /// Result of button behavior execution, indicating whether display refresh should be skipped
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub(in crate::daemon::ui) struct BtnInvokeStatus {
     pub skip_refresh: bool,
 }
@@ -32,18 +33,20 @@ async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     deck.view_stack.pop();
     deck.display_top_page().await?;
 
-    let mut result = BtnInvokeStatus::default();
-    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
-    Ok(result)
+    Ok(BtnInvokeStatus {
+        skip_refresh: true, // display_top_page() already sent UiCommand::Flip
+        ..BtnInvokeStatus::default()
+    })
 }
 
 async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatus> {
     deck.view_stack.push(View::new(id));
     deck.display_top_page().await?;
 
-    let mut result = BtnInvokeStatus::default();
-    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
-    Ok(result)
+    Ok(BtnInvokeStatus {
+        skip_refresh: true, // display_top_page() already sent UiCommand::Flip
+        ..BtnInvokeStatus::default()
+    })
 }
 
 async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatus> {
@@ -74,9 +77,11 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
 
     deck.display_top_page().await?;
 
-    let mut result = BtnInvokeStatus::default();
-    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
-    Ok(result)
+    // display_top_page() already sent UiCommand::Flip
+    Ok(BtnInvokeStatus {
+        skip_refresh: true,
+        ..BtnInvokeStatus::default()
+    })
 }
 
 async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
@@ -89,9 +94,10 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus>
 
     deck.display_top_page().await?;
 
-    let mut result = BtnInvokeStatus::default();
-    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
-    Ok(result)
+    Ok(BtnInvokeStatus {
+        skip_refresh: true, // display_top_page() already sent UiCommand::Flip
+        ..BtnInvokeStatus::default()
+    })
 }
 
 async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<BtnInvokeStatus> {

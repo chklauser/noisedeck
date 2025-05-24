@@ -87,7 +87,7 @@ mod config {
         pub volume: f64,
         pub mode: PlaybackMode,
         pub fade_in: Option<Duration>,
-        pub fade_out: Option<Duration>
+        pub fade_out: Option<Duration>,
     }
 
     #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -95,19 +95,19 @@ mod config {
         PushPage(Uuid),
         PlaySound(Arc<String>, PlaySoundSettings),
     }
-    
+
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub enum PlaybackMode {
         PlayStop,
         PlayOverlap,
         LoopStop,
     }
-    
+
     impl PlaybackMode {
         pub fn loops(&self) -> bool {
             matches!(self, PlaybackMode::LoopStop)
         }
-        
+
         pub fn overlaps(&self) -> bool {
             matches!(self, PlaybackMode::PlayOverlap)
         }

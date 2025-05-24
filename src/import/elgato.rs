@@ -1,8 +1,8 @@
 use serde::{Deserialize, Deserializer};
+use serde_repr::Deserialize_repr;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use serde_repr::Deserialize_repr;
 use uuid::Uuid;
 
 #[derive(Deserialize, Debug)]
@@ -112,7 +112,7 @@ impl FadeType {
             FadeType::Out | FadeType::None => None,
         }
     }
-    
+
     pub fn when_out<T>(&self, value: T) -> Option<T> {
         match self {
             FadeType::Out | FadeType::InOut => Some(value),
