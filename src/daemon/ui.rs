@@ -13,31 +13,45 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// Result of button behavior execution, indicating whether display refresh should be skipped
+#[derive(Debug, Clone, Default)]
+pub(in crate::daemon::ui) struct BtnInvokeStatus {
+    pub skip_refresh: bool,
+}
+
 mod btn;
 
 pub use btn::ButtonRef;
 
-async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<()> {
+async fn btn_pop(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     if deck.view_stack.len() <= 1 {
         debug!("ignoring pop at home page");
-        return Ok(());
+        return Ok(BtnInvokeStatus::default());
     }
 
     deck.view_stack.pop();
-    deck.display_top_page().await
+    deck.display_top_page().await?;
+
+    let mut result = BtnInvokeStatus::default();
+    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
+    Ok(result)
 }
 
-async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
+async fn btn_push(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatus> {
     deck.view_stack.push(View::new(id));
-    deck.display_top_page().await
+    deck.display_top_page().await?;
+
+    let mut result = BtnInvokeStatus::default();
+    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
+    Ok(result)
 }
 
-async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<()> {
+async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatus> {
     deck.view_stack.clear();
     btn_push(deck, id).await
 }
 
-async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
+async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     let geo = deck.geo;
 
     // tracks
@@ -58,10 +72,14 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<()> {
         deck.playing.offset = 0;
     }
 
-    deck.display_top_page().await
+    deck.display_top_page().await?;
+
+    let mut result = BtnInvokeStatus::default();
+    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
+    Ok(result)
 }
 
-async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<()> {
+async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     // tracks
     let view = deck.current_view_mut()?;
     view.offset = 0;
@@ -69,10 +87,14 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<()> {
     // playing
     deck.playing.offset = 0;
 
-    deck.display_top_page().await
+    deck.display_top_page().await?;
+
+    let mut result = BtnInvokeStatus::default();
+    result.skip_refresh = true; // display_top_page() already sent UiCommand::Flip
+    Ok(result)
 }
 
-async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<()> {
+async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<BtnInvokeStatus> {
     let state = track.read().await;
     let track = track.clone();
     deck.audio_command_tx
@@ -82,7 +104,8 @@ async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result
             AudioCommand::Play(track)
         })
         .await?;
-    Ok(())
+
+    Ok(BtnInvokeStatus::default())
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
@@ -484,13 +507,15 @@ impl NoiseDeck {
     #[tracing::instrument(skip(self), level = "trace")]
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
-            {
+            let result = {
                 let mut button_guard = button.inner.data.write().await;
                 on_tap
                     .invoke(self, &button.inner, &mut button_guard)
-                    .await?;
+                    .await?
+            };
+            if !result.skip_refresh {
+                self.ui_command_tx.send(UiCommand::Refresh).await?;
             }
-            self.ui_command_tx.send(UiCommand::Refresh).await?;
         } else {
             debug!("Button tap event received, but no handler set");
         }
@@ -645,25 +670,17 @@ mod tests {
         // Tap the back button to return to the main page
         ui_event_tx.send(UiEvent::ButtonTap(back_button)).await?;
 
-        // Back button tap triggers two commands:
-        // 1. btn_pop() -> display_top_page() -> UiCommand::Flip (with new page content)
-        // 2. handle_button_tap() always sends UiCommand::Refresh after button behavior
-        // We need to handle both commands in either order
-        let first_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
+        // Back button tap triggers one command:
+        // btn_pop() -> display_top_page() -> UiCommand::Flip (with new page content)
+        let command = timeout(Duration::from_millis(100), ui_command_rx.recv())
             .await
-            .expect("Should receive first command")
+            .expect("Should receive command")
             .expect("Should receive command");
 
-        let second_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive second command")
-            .expect("Should receive command");
-
-        // Extract the buttons from the Flip command and verify we got both command types
-        let returned_buttons = match (&first_command, &second_command) {
-            (UiCommand::Flip(buttons), UiCommand::Refresh) => buttons.clone(),
-            (UiCommand::Refresh, UiCommand::Flip(buttons)) => buttons.clone(),
-            _ => panic!("Expected one Flip and one Refresh command, got {:?} and {:?}", first_command, second_command),
+        // Extract the buttons from the Flip command
+        let returned_buttons = match command {
+            UiCommand::Flip(buttons) => buttons,
+            _ => panic!("Expected Flip command, got {:?}", command),
         };
 
         // Verify we have the main page button again (should have "Go to Target" button)

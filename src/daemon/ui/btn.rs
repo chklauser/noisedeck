@@ -1,12 +1,13 @@
+use crate::config::PlaySoundSettings;
 use crate::daemon::audio::Track;
 use crate::daemon::ui::{
-    ButtonData, NoiseDeck, btn_goto, btn_play_stop, btn_pop, btn_push, btn_reset_offset, btn_rotate,
+    BtnInvokeStatus, ButtonData, NoiseDeck, btn_goto, btn_play_stop, btn_pop, btn_push,
+    btn_reset_offset, btn_rotate,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use tracing::warn;
 use uuid::Uuid;
-use crate::config::PlaySoundSettings;
 
 #[derive(Default)]
 pub struct Button {
@@ -45,32 +46,22 @@ impl ButtonBehavior {
         deck: &mut NoiseDeck,
         button: &Button,
         _data: &mut ButtonData,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<BtnInvokeStatus> {
         match self {
-            ButtonBehavior::Pop => {
-                btn_pop(deck).await?;
-            }
-            ButtonBehavior::Push(id) => {
-                btn_push(deck, *id).await?;
-            }
-            ButtonBehavior::Goto(id) => {
-                btn_goto(deck, *id).await?;
-            }
+            ButtonBehavior::Pop => btn_pop(deck).await,
+            ButtonBehavior::Push(id) => btn_push(deck, *id).await,
+            ButtonBehavior::Goto(id) => btn_goto(deck, *id).await,
             ButtonBehavior::PlayStop => {
                 if let Some(track) = &button.track {
-                    btn_play_stop(deck, track).await?;
+                    btn_play_stop(deck, track).await
                 } else {
                     warn!("Button has no track assigned");
+                    Ok(BtnInvokeStatus::default())
                 }
             }
-            ButtonBehavior::Rotate => {
-                btn_rotate(deck).await?;
-            }
-            ButtonBehavior::ResetOffset => {
-                btn_reset_offset(deck).await?;
-            }
+            ButtonBehavior::Rotate => btn_rotate(deck).await,
+            ButtonBehavior::ResetOffset => btn_reset_offset(deck).await,
         }
-        Ok(())
     }
 }
 
