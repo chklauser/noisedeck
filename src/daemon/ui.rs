@@ -552,7 +552,145 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    /// Creates a minimal test configuration with a single page containing one button
+    // Button label constants to avoid magic strings
+    const NAV_BUTTON_LABEL: &str = "Go to Target";
+    const BACK_BUTTON_LABEL: &str = "Back";
+    const SOUND_BUTTON_LABEL: &str = "Play Sound";
+
+    /// Test harness for user-focused acceptance testing
+    struct TestHarness {
+        ui_event_tx: Sender<UiEvent>,
+        ui_command_rx: Receiver<UiCommand>,
+        audio_command_rx: Receiver<AudioCommand>,
+        deck_handle: tokio::task::JoinHandle<eyre::Result<()>>,
+        current_buttons: Vec<Option<ButtonRef>>,
+    }
+
+    impl TestHarness {
+        async fn new() -> eyre::Result<Self> {
+            let (mut deck, ui_event_tx, mut ui_command_rx, _audio_event_tx, audio_command_rx) = {
+                let config = create_test_config();
+                NoiseDeck::new(Kind::Mk2, config)
+            };
+
+            let deck_handle = tokio::spawn(async move {
+                deck.init().await.unwrap();
+                deck.run().await
+            });
+
+            // Consume initial display and store current buttons
+            let initial_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
+                .await
+                .expect("Should receive initial command")
+                .expect("Should receive command");
+
+            let current_buttons = match initial_command {
+                UiCommand::Flip(buttons) => buttons,
+                _ => panic!(
+                    "Expected initial UiCommand::Flip, got {:?}",
+                    initial_command
+                ),
+            };
+
+            Ok(TestHarness {
+                ui_event_tx,
+                ui_command_rx,
+                audio_command_rx,
+                deck_handle,
+                current_buttons,
+            })
+        }
+
+        async fn tap_button(&mut self, label: &str) -> eyre::Result<()> {
+            let button = self
+                .find_button_by_label(label)
+                .await
+                .ok_or_else(|| eyre::eyre!("Button '{}' not found on current page", label))?;
+
+            self.ui_event_tx.send(UiEvent::ButtonTap(button)).await?;
+            Ok(())
+        }
+
+        async fn expect_navigation(&mut self) -> eyre::Result<()> {
+            let command = timeout(Duration::from_millis(100), self.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command within timeout")
+                .expect("Should receive UI command");
+
+            match command {
+                UiCommand::Flip(buttons) => {
+                    self.current_buttons = buttons;
+                }
+                _ => return Err(eyre::eyre!(
+                    "Expected Flip command for navigation, got {:?}",
+                    command
+                )),
+            }
+            Ok(())
+        }
+
+        async fn expect_on_page_with_button(&self, label: &str) -> eyre::Result<()> {
+            if self.find_button_by_label(label).await.is_none() {
+                return Err(eyre::eyre!(
+                    "Expected to be on page with '{}' button",
+                    label
+                ));
+            }
+            Ok(())
+        }
+
+        async fn expect_audio_command(&mut self) -> eyre::Result<AudioCommand> {
+            timeout(Duration::from_millis(100), self.audio_command_rx.recv())
+                .await
+                .expect("Should receive audio command within timeout")
+                .ok_or_else(|| eyre::eyre!("Audio command channel closed"))
+        }
+
+        async fn expect_refresh(&mut self) -> eyre::Result<()> {
+            let command = timeout(Duration::from_millis(100), self.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command within timeout")
+                .expect("Should receive UI command");
+
+            assert_matches!(command, UiCommand::Refresh);
+            Ok(())
+        }
+
+        async fn expect_no_audio_commands(&mut self) -> eyre::Result<()> {
+            let result = timeout(Duration::from_millis(50), self.audio_command_rx.recv()).await;
+            assert_matches!(result, Err(_)); // Timeout is expected - no commands
+            Ok(())
+        }
+
+        async fn find_button_by_label(&self, label: &str) -> Option<ButtonRef> {
+            for opt_btn in &self.current_buttons {
+                if let Some(btn) = opt_btn {
+                    let button_data = btn.read().await;
+                    if button_data.label.as_str() == label {
+                        return Some(btn.clone());
+                    }
+                }
+            }
+            None
+        }
+
+        async fn cleanup(self) {
+            drop(self.ui_event_tx);
+            let _ = timeout(Duration::from_millis(100), self.deck_handle).await;
+        }
+    }
+
+    /// Runs a test with automatic harness cleanup
+    async fn with_test_harness<F>(test_fn: F) -> eyre::Result<()>
+    where
+        F: AsyncFn(&mut TestHarness) -> eyre::Result<()>,
+    {
+        let mut harness = TestHarness::new().await?;
+        let result = test_fn(&mut harness).await;
+        harness.cleanup().await;
+        result
+    }
+
     fn create_test_config() -> Arc<Config> {
         let start_page = Uuid::from_u128(1);
         let target_page = Uuid::from_u128(2);
@@ -563,7 +701,7 @@ mod tests {
         let main_page = config::Page {
             name: "Main".to_string(),
             buttons: vec![config::Button {
-                label: Arc::new("Go to Target".to_string()),
+                label: Arc::new(NAV_BUTTON_LABEL.to_string()),
                 behavior: ButtonBehavior::PushPage(target_page),
             }],
         };
@@ -573,7 +711,7 @@ mod tests {
         let target_page_config = config::Page {
             name: "Target".to_string(),
             buttons: vec![config::Button {
-                label: Arc::new("Play Sound".to_string()),
+                label: Arc::new(SOUND_BUTTON_LABEL.to_string()),
                 behavior: ButtonBehavior::PlaySound(
                     Arc::new("test_sound.mp3".to_string()),
                     PlaySoundSettings {
@@ -590,277 +728,47 @@ mod tests {
         Arc::new(Config { pages, start_page })
     }
 
-    /// Helper to create a test NoiseDeck instance with all channels
-    fn create_test_deck() -> (
-        NoiseDeck,
-        Sender<UiEvent>,
-        Receiver<UiCommand>,
-        Sender<AudioEvent>,
-        Receiver<AudioCommand>,
-    ) {
-        let config = create_test_config();
-        NoiseDeck::new(Kind::Mk2, config)
-    }
-
     #[tokio::test]
     async fn test_back_button_navigation() -> eyre::Result<()> {
-        let (mut deck, ui_event_tx, mut ui_command_rx, _audio_event_tx, _audio_command_rx) =
-            create_test_deck();
-
-        // Start the deck in a background task
-        let deck_handle = tokio::spawn(async move {
-            deck.init().await.unwrap();
-            deck.run().await
-        });
-
-        // Consume initial display command from init() and extract actual buttons
-        let initial_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive initial command")
-            .expect("Should receive command");
-
-        // Extract the actual ButtonRef instances from the initial display (main page)
-        assert_matches!(initial_command, UiCommand::Flip(_));
-        let UiCommand::Flip(main_page_buttons) = initial_command else {
-            unreachable!()
-        };
-
-        // Find the navigation button on the main page
-        let mut nav_button = None;
-        for opt_btn in &main_page_buttons {
-            if let Some(btn) = opt_btn {
-                let button_data = btn.read().await;
-                if button_data.label.as_str() == "Go to Target" {
-                    nav_button = Some(btn.clone());
-                    break;
-                }
-            }
-        }
-        let nav_button =
-            nav_button.expect("Should find navigation button with label 'Go to Target'");
-
-        // Tap the navigation button to go to the target page
-        ui_event_tx.send(UiEvent::ButtonTap(nav_button)).await?;
-
-        // Receive the navigation command (should be Flip with target page)
-        let nav_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive navigation command")
-            .expect("Should receive command");
-
-        // Extract buttons from the target page (should include back button)
-        assert_matches!(nav_command, UiCommand::Flip(_));
-        let UiCommand::Flip(target_page_buttons) = nav_command else {
-            unreachable!()
-        };
-
-        // Find the back button on the target page
-        let mut back_button = None;
-        for opt_btn in &target_page_buttons {
-            if let Some(btn) = opt_btn {
-                let button_data = btn.read().await;
-                if button_data.label.as_str() == "Back" {
-                    back_button = Some(btn.clone());
-                    break;
-                }
-            }
-        }
-        let back_button = back_button.expect("Should find back button with label 'Back'");
-
-        // Tap the back button to return to the main page
-        ui_event_tx.send(UiEvent::ButtonTap(back_button)).await?;
-
-        // Back button tap triggers one command:
-        // btn_pop() -> display_top_page() -> UiCommand::Flip (with new page content)
-        let command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive command")
-            .expect("Should receive command");
-
-        // Extract the buttons from the Flip command
-        let returned_buttons = match command {
-            UiCommand::Flip(buttons) => buttons,
-            _ => panic!("Expected Flip command, got {:?}", command),
-        };
-
-        // Verify we have the main page button again (should have "Go to Target" button)
-        let mut has_nav_button = false;
-        for opt_btn in &returned_buttons {
-            if let Some(btn) = opt_btn {
-                let button_data = btn.read().await;
-                if button_data.label.as_str() == "Go to Target" {
-                    has_nav_button = true;
-                    break;
-                }
-            }
-        }
-        assert!(
-            has_nav_button,
-            "Should be back on main page with 'Go to Target' button"
-        );
-
-        // Clean up
-        drop(ui_event_tx);
-        let _ = timeout(Duration::from_millis(100), deck_handle).await;
-
-        Ok(())
+        with_test_harness(async |harness| {
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(BACK_BUTTON_LABEL).await?;
+            
+            harness.tap_button(BACK_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(NAV_BUTTON_LABEL).await?;
+            
+            Ok(())
+        }).await
     }
 
     #[tokio::test]
     async fn test_button_tap_navigation() -> eyre::Result<()> {
-        let (mut deck, ui_event_tx, mut ui_command_rx, _audio_event_tx, mut audio_command_rx) =
-            create_test_deck();
-
-        // Get the first button from the current page layout before starting
-        let current_page_id = deck.view_stack.last().unwrap().page_id;
-        let page = deck.config.pages.get(&current_page_id).unwrap();
-
-        // Create a button reference for the first button (navigation button)
-        let nav_button = Button::builder()
-            .data(ButtonData {
-                label: page.buttons[0].label.clone(),
-                notification: None,
-            })
-            .on_tap(btn::ButtonBehavior::Push(
-                // Extract target page ID from the button behavior
-                match &page.buttons[0].behavior {
-                    ButtonBehavior::PushPage(id) => *id,
-                    _ => panic!("Expected PushPage behavior"),
-                },
-            ))
-            .build()
-            .into();
-
-        // Start the deck in a background task
-        let deck_handle = tokio::spawn(async move {
-            // Initialize the deck (this will send initial display commands)
-            deck.init().await.unwrap();
-            deck.run().await
-        });
-
-        // First, consume the initial display command from init()
-        let initial_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive initial command within timeout")
-            .expect("Should receive initial command");
-
-        assert_matches!(initial_command, UiCommand::Flip(_));
-
-        // Now send a button tap event
-        ui_event_tx.send(UiEvent::ButtonTap(nav_button)).await?;
-
-        // We should receive a Flip command after the button tap (navigation to new page)
-        let navigation_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive command within timeout")
-            .expect("Should receive a command");
-
-        assert_matches!(navigation_command, UiCommand::Flip(_));
-
-        // Check that no audio commands were sent (since this was navigation)
-        let audio_result = timeout(Duration::from_millis(50), audio_command_rx.recv()).await;
-        assert!(
-            audio_result.is_err(),
-            "Should not receive audio commands for navigation"
-        );
-
-        // Clean up
-        drop(ui_event_tx);
-        let _ = timeout(Duration::from_millis(100), deck_handle).await;
-
-        Ok(())
+        with_test_harness(async |harness| {
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(BACK_BUTTON_LABEL).await?;
+            harness.expect_no_audio_commands().await?;
+            
+            Ok(())
+        }).await
     }
 
     #[tokio::test]
     async fn test_sound_button_tap_sends_audio_command() -> eyre::Result<()> {
-        let (mut deck, ui_event_tx, mut ui_command_rx, _audio_event_tx, mut audio_command_rx) =
-            create_test_deck();
-
-        // Start the deck in a background task
-        let deck_handle = tokio::spawn(async move {
-            deck.init().await.unwrap();
-            deck.run().await
-        });
-
-        // Consume initial display command from init() and extract actual buttons
-        let initial_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive initial command")
-            .expect("Should receive command");
-
-        // Extract the actual ButtonRef instances from the initial display
-        assert_matches!(initial_command, UiCommand::Flip(_));
-        let UiCommand::Flip(actual_buttons) = initial_command else {
-            unreachable!()
-        };
-
-        // Navigate to the target page to get the sound button
-        // First, find the navigation button on the main page (should be "Go to Target")
-        let mut nav_button = None;
-        for opt_btn in &actual_buttons {
-            if let Some(btn) = opt_btn {
-                let button_data = btn.read().await;
-                if button_data.label.as_str() == "Go to Target" {
-                    nav_button = Some(btn.clone());
-                    break;
-                }
-            }
-        }
-        let nav_button =
-            nav_button.expect("Should find navigation button with label 'Go to Target'");
-
-        // Tap the navigation button to go to the target page
-        ui_event_tx.send(UiEvent::ButtonTap(nav_button)).await?;
-
-        // Receive the navigation command (should be Flip with new page)
-        let nav_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive navigation command")
-            .expect("Should receive command");
-
-        // Extract buttons from the target page
-        assert_matches!(nav_command, UiCommand::Flip(_));
-        let UiCommand::Flip(target_page_buttons) = nav_command else {
-            unreachable!()
-        };
-
-        // Find the sound button on the target page (should be "Play Sound")
-        let mut sound_button = None;
-        for opt_btn in &target_page_buttons {
-            if let Some(btn) = opt_btn {
-                let button_data = btn.read().await;
-                if button_data.label.as_str() == "Play Sound" {
-                    sound_button = Some(btn.clone());
-                    break;
-                }
-            }
-        }
-        let sound_button = sound_button.expect("Should find sound button with label 'Play Sound'");
-
-        // Send a sound button tap event
-        ui_event_tx.send(UiEvent::ButtonTap(sound_button)).await?;
-
-        // We should receive an audio command (Play or Stop)
-        let audio_command = timeout(Duration::from_millis(100), audio_command_rx.recv())
-            .await
-            .expect("Should receive audio command within timeout")
-            .expect("Should receive an audio command");
-
-        // Verify it's specifically a Play command (since nothing should be playing initially)
-        assert_matches!(audio_command, crate::daemon::audio::AudioCommand::Play(_));
-
-        // We should also receive a UI refresh command
-        let ui_command = timeout(Duration::from_millis(100), ui_command_rx.recv())
-            .await
-            .expect("Should receive UI command within timeout")
-            .expect("Should receive UI command");
-
-        assert_matches!(ui_command, UiCommand::Refresh);
-
-        // Clean up
-        drop(ui_event_tx);
-        let _ = timeout(Duration::from_millis(100), deck_handle).await;
-
-        Ok(())
+        with_test_harness(async |harness| {
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(SOUND_BUTTON_LABEL).await?;
+            
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            
+            let audio_command = harness.expect_audio_command().await?;
+            assert_matches!(audio_command, crate::daemon::audio::AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+            
+            Ok(())
+        }).await
     }
 }

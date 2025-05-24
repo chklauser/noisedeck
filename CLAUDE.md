@@ -139,3 +139,11 @@ src/
 ### Reliability
 - The application must not crash/panic
 - The application should try to recover from errors and restore itself into a working state
+
+### Code style
+- Use explicit type state (e.g., prefer an enum or a record over a naked boolean)
+- Comments must add insight into why code is written in a particular way. I don't want comments that just repeat _what_ is happening or _how_ somehting is happening (I can read the code for that).
+- Comments must not repeat information that is already conveyed by type signatures.
+- If some values have special meaning (true, false, zero, negative numbers), that's worth mentioning in a comment.
+- Prefer standard Rust language features (traits, generics, dyn) over macros whenever possible
+- Macros are allowed as a solution, but their scope should be kept minimal (as in: the macro arguments should contain as little code as possible). Reason: the editor experience inside macro arguments is not great. Less code within macros results in a better editing experience.
