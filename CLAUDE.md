@@ -1,4 +1,4 @@
-# CLAUDE.md - Noisedeck Project Guide
+# Noisedeck Project Guide for Agents
 
 ## Project Overview
 
