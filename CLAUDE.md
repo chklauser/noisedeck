@@ -1,5 +1,17 @@
 # Noisedeck Project Guide for Agents
 
+## Table of Contents
+- [Project Overview](#project-overview)
+- [Architecture](#architecture)
+- [Technology Stack](#technology-stack)
+- [Configuration System](#configuration-system)
+- [Development Practices](#development-practices)
+- [Key Design Decisions](#key-design-decisions)
+- [Working with the Codebase](#working-with-the-codebase)
+- [Environment Setup](#environment-setup)
+- [Common Patterns](#common-patterns)
+- [Contribution Guidelines](#contribution-guidelines)
+
 ## Project Overview
 
 Noisedeck is a specialized replacement for Elgato Stream Deck controller software with a singular focus: playing ambient sounds and background music for tabletop RPG sessions. Unlike the official extensible platform, Noisedeck deliberately limits its scope to audio playback for better performance and user experience.
@@ -112,11 +124,11 @@ src/
 - Prefer async-compatible crates
 - Minimize runtime dependencies for deployment
 
-### Testing
-- Focus on _our_ logic. We don't need to test whether a dependency, such as Krita, tokio or elgato-streamdeck, works correctly. We assume that our dependencies are well tested.'
+-### Testing
+- Focus on _our_ logic. We don't need to test whether a dependency, such as Kira, tokio or elgato-streamdeck, works correctly. We assume that our dependencies are well tested.
+- Run tests with `cargo test`.
 - Prefer high-level "integration" tests over unit tests (not integration tests in the Cargo `tests/` sense, but integration tests in the sense that we want to test as much of the system at once as possible)
 - The previous two goals are obviously in tension. I'd rather have tests of the `daemon/ui.rs` component as a whole than creating a complex test harness _just_ to fake streamdeck and audio hardware.
-
 ## Environment Setup
 
 ### Environment Variables
@@ -144,9 +156,22 @@ src/
 
 ### Code style
 - Use explicit type state (e.g., prefer an enum or a record over a naked boolean)
-- Comments must add insight into why code is written in a particular way. I don't want comments that just repeat _what_ is happening or _how_ somehting is happening (I can read the code for that).
+ - Comments must add insight into why code is written in a particular way. I don't want comments that just repeat _what_ is happening or _how_ something is happening (I can read the code for that).
 - Comments must not repeat information that is already conveyed by type signatures.
 - If some values have special meaning (true, false, zero, negative numbers), that's worth mentioning in a comment.
 - Prefer standard Rust language features (traits, generics, dyn) over macros whenever possible
 - Macros are allowed as a solution, but their scope should be kept minimal (as in: the macro arguments should contain as little code as possible). Reason: the editor experience inside macro arguments is not great. Less code within macros results in a better editing experience.
 - Where possible, prefer async closures `async |x| {}` over `|x| async move {}`
+
+## Contribution Guidelines
+
+### Local Development Workflow
+- Implement your functionality, adding tests where appropriate.
+- For bug fixes, write a reproducing failing test before modifying the code.
+- Run `cargo check`.
+- Run `cargo test`.
+- Run `cargo clippy`.
+- Run `cargo fmt`.
+
+### Commit Messages and PRs
+- Explain **why** a change is made, not what the change is. Keep the explanation high level.
