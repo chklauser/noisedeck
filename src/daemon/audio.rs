@@ -5,6 +5,7 @@ use kira::effect::volume_control::VolumeControlHandle;
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::sound::{FromFileError, PlaybackState};
 use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Easing, Tween};
+use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use tracing::{error, info, instrument, trace};
 pub struct Track {
     pub path: Arc<PathBuf>,
     pub settings: PlaySoundSettings,
-    state: Mutex<TrackState>,
+    state: Mutex<Box<dyn TrackState>>,
 }
 
 impl std::fmt::Debug for Track {
@@ -27,50 +28,78 @@ impl std::fmt::Debug for Track {
 
 impl Track {
     pub fn new(path: Arc<PathBuf>, settings: PlaySoundSettings) -> Self {
+        Self::with_state(path, settings, Box::<RealTrackState>::default())
+    }
+
+    pub fn with_state(
+        path: Arc<PathBuf>,
+        settings: PlaySoundSettings,
+        state: Box<dyn TrackState>,
+    ) -> Self {
         Track {
             path,
             settings,
-            state: Mutex::default(),
+            state: Mutex::new(state),
         }
     }
 
     pub async fn read(&self) -> TrackStateData {
         let guard = self.state.lock().await;
-        (&*guard).into()
-    }
-}
-
-#[derive(Default)]
-pub struct TrackState {
-    sink: Option<StreamingSoundHandle<FromFileError>>,
-    pub duration: Option<Duration>,
-}
-pub struct TrackStateData {
-    pub rem_duration: Option<Duration>,
-    pub playback: PlaybackState,
-}
-impl From<&TrackState> for TrackStateData {
-    fn from(state: &TrackState) -> Self {
         TrackStateData {
-            rem_duration: state.rem_duration(),
-            playback: state.playback_state(),
+            rem_duration: guard.rem_duration(),
+            playback: guard.playback_state(),
         }
     }
 }
 
-impl TrackState {
-    pub fn rem_duration(&self) -> Option<Duration> {
+pub trait TrackState: Send {
+    fn rem_duration(&self) -> Option<Duration>;
+    fn playback_state(&self) -> PlaybackState;
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+#[derive(Default)]
+pub struct RealTrackState {
+    pub sink: Option<StreamingSoundHandle<FromFileError>>,
+    pub duration: Option<Duration>,
+}
+
+impl TrackState for RealTrackState {
+    fn rem_duration(&self) -> Option<Duration> {
         self.duration.zip(self.sink.as_ref()).map(|(d, h)| {
             let played = Duration::from_secs_f64(h.position());
             d.checked_sub(played).unwrap_or_default()
         })
     }
 
-    pub fn playback_state(&self) -> PlaybackState {
+    fn playback_state(&self) -> PlaybackState {
         self.sink
             .as_ref()
             .map(|s| s.state())
             .unwrap_or(PlaybackState::Stopped)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+pub struct TrackStateData {
+    pub rem_duration: Option<Duration>,
+    pub playback: PlaybackState,
+}
+
+impl<T: TrackState + ?Sized> From<&T> for TrackStateData {
+    fn from(state: &T) -> Self {
+        TrackStateData {
+            rem_duration: state.rem_duration(),
+            playback: state.playback_state(),
+        }
     }
 }
 
@@ -142,8 +171,12 @@ impl AudioState {
             track_handle.set_loop_region(..);
         }
 
-        track_state_guard.sink = Some(track_handle);
-        track_state_guard.duration = Some(total_duration);
+        let state = track_state_guard
+            .as_any_mut()
+            .downcast_mut::<RealTrackState>()
+            .expect("invalid track state type");
+        state.sink = Some(track_handle);
+        state.duration = Some(total_duration);
 
         self.tracks.push(track.clone());
         Ok(())
@@ -153,13 +186,17 @@ impl AudioState {
     pub fn shutdown(self) {
         for track in self.tracks {
             let mut track_state_guard = track.state.blocking_lock();
-            if let Some(sink) = &mut track_state_guard.sink {
+            let state = track_state_guard
+                .as_any_mut()
+                .downcast_mut::<RealTrackState>()
+                .expect("invalid track state type");
+            if let Some(sink) = &mut state.sink {
                 sink.stop(Tween {
                     duration: Duration::default(),
                     ..Default::default()
                 })
             }
-            track_state_guard.sink = None;
+            state.sink = None;
         }
     }
 }
@@ -218,14 +255,18 @@ fn run_sync(
             }
             AsyncCommand(AudioCommand::Stop(track)) => {
                 let mut track_state_guard = track.state.blocking_lock();
-                if let Some(sink) = &mut track_state_guard.sink {
+                let track_state = track_state_guard
+                    .as_any_mut()
+                    .downcast_mut::<RealTrackState>()
+                    .expect("invalid track state type");
+                if let Some(sink) = &mut track_state.sink {
                     sink.stop(Tween {
                         duration: Duration::from_millis(2000),
                         easing: Easing::InPowi(2),
                         ..Default::default()
                     });
                 }
-                track_state_guard.sink = None;
+                track_state.sink = None;
                 drop(track_state_guard);
 
                 state.tracks.retain(|t| !Arc::ptr_eq(&track, t));
@@ -235,7 +276,11 @@ fn run_sync(
                 let mut idx_to_remove = Vec::new();
                 for (idx, track) in state.tracks.iter().enumerate() {
                     let state_guard = track.state.blocking_lock();
-                    if let Some(sink) = &state_guard.sink {
+                    let track_state = state_guard
+                        .as_any()
+                        .downcast_ref::<RealTrackState>()
+                        .expect("invalid track state type");
+                    if let Some(sink) = &track_state.sink {
                         if sink.state() == PlaybackState::Stopped {
                             idx_to_remove.push(idx);
                         }

@@ -22,6 +22,38 @@ pub const NAV_BUTTON_LABEL: &str = "Go to Target";
 pub const BACK_BUTTON_LABEL: &str = "Back";
 pub const SOUND_BUTTON_LABEL: &str = "Play Sound";
 
+use kira::sound::PlaybackState;
+
+pub struct MockTrackState {
+    pub playback: PlaybackState,
+}
+
+impl Default for MockTrackState {
+    fn default() -> Self {
+        MockTrackState {
+            playback: PlaybackState::Stopped,
+        }
+    }
+}
+
+impl crate::daemon::audio::TrackState for MockTrackState {
+    fn rem_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    fn playback_state(&self) -> PlaybackState {
+        self.playback
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 pub struct TestHarness {
     pub ui_event_tx: Sender<UiEvent>,
     pub ui_command_rx: Receiver<UiCommand>,
@@ -131,23 +163,38 @@ impl TestHarness {
     }
 
     pub async fn simulate_track_state_changed(&mut self, sound_path: &str) -> eyre::Result<()> {
+        self.simulate_track_state_changed_with_playback(
+            sound_path,
+            PlaybackState::Stopped,
+        )
+        .await
+    }
+
+    pub async fn simulate_track_state_changed_with_playback(
+        &mut self,
+        sound_path: &str,
+        playback: PlaybackState,
+    ) -> eyre::Result<()> {
         use crate::daemon::audio::{AudioEvent, Track};
         use std::path::PathBuf;
 
-        let track = Arc::new(Track::new(
-            Arc::new(PathBuf::from(sound_path)),
+        let path_arc = self
+            .find_button_by_label(SOUND_BUTTON_LABEL)
+            .await
+            .and_then(|b| b.inner.track.as_ref().map(|t| t.path.clone()))
+            .unwrap_or_else(|| Arc::new(PathBuf::from(sound_path)));
+
+        let track = Arc::new(Track::with_state(
+            path_arc,
             PlaySoundSettings {
                 volume: 0.8,
                 mode: PlaybackMode::PlayStop,
                 fade_in: Some(Duration::from_millis(100)),
                 fade_out: Some(Duration::from_millis(100)),
             },
+            Box::new(MockTrackState { playback }),
         ));
 
-        // Send the track state changed event
-        // The UI will call track.read() to get the current state
-        // Since we can't mock the internal StreamingSoundHandle,
-        // the track will appear as stopped (default state)
         self.audio_event_tx
             .send(AudioEvent::TrackStateChanged(track))
             .await?;
@@ -164,6 +211,15 @@ impl TestHarness {
             }
         }
         None
+    }
+
+    pub async fn button_notification(&self, label: &str) -> eyre::Result<Option<String>> {
+        let btn = self
+            .find_button_by_label(label)
+            .await
+            .ok_or_else(|| eyre::eyre!("Button '{}' not found on current page", label))?;
+        let data = btn.read().await;
+        Ok(data.notification.clone())
     }
 
     async fn cleanup(self) {
