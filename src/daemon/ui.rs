@@ -551,6 +551,7 @@ pub use iface::{UiCommand, UiEvent};
 
 #[cfg(test)]
 mod tests {
+    use super::UiCommand;
     use crate::daemon::audio::AudioCommand;
     use assert_matches::assert_matches;
     use harness::{BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL, with_test_harness};
@@ -626,6 +627,7 @@ mod tests {
             harness.tap_button(SOUND_BUTTON_LABEL).await?;
             let audio_cmd = harness.expect_audio_command().await?;
             assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
 
             // Simulate track state change - should trigger a refresh since the track is now known
             harness
@@ -711,6 +713,42 @@ mod tests {
             // Should not receive any UI commands
             let result = timeout(Duration::from_millis(50), harness.ui_command_rx.recv()).await;
             assert_matches!(result, Err(_)); // Timeout is expected - no commands
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_track_playing_state_updates_button() -> eyre::Result<()> {
+        use kira::sound::PlaybackState;
+
+        with_test_harness(async |harness| {
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    PlaybackState::Playing,
+                )
+                .await?;
+
+            let command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+            assert_matches!(command.unwrap(), UiCommand::Refresh | UiCommand::Flip(_));
+
+            let notif = harness.button_notification(SOUND_BUTTON_LABEL).await?;
+            assert!(notif.is_some());
 
             Ok(())
         })
