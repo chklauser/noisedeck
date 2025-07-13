@@ -57,20 +57,24 @@ async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatu
 async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     let geo = deck.geo;
 
-    // tracks
+    // For library pages, rotate both content and dynamic areas
+    // For volume control pages, only rotate the dynamic area
     let view = deck.current_view()?;
-    let page_id = view.page_id().ok_or_else(|| eyre::eyre!("Cannot rotate view that has no page ID"))?;
-    let page = deck.get_library_category(&page_id)?.to_vec();
-    let page_len = page.len();
-    let view = deck.current_view()?;
-    let (_, n_displayed) = deck.layout_page(&page, view);
-    let view = deck.current_view_mut()?;
-    view.offset += geo.n_content.max(n_displayed);
-    if view.offset >= page_len {
-        view.offset = 0;
+    if !view.is_volume_control() {
+        // tracks (library page content)
+        let page_id = view.page_id().ok_or_else(|| eyre::eyre!("Cannot rotate view that has no page ID"))?;
+        let page = deck.get_library_category(&page_id)?.to_vec();
+        let page_len = page.len();
+        let view = deck.current_view()?;
+        let (_, n_displayed) = deck.layout_page(&page, view);
+        let view = deck.current_view_mut()?;
+        view.offset += geo.n_content.max(n_displayed);
+        if view.offset >= page_len {
+            view.offset = 0;
+        }
     }
 
-    // playing
+    // playing (dynamic area - always rotate for both library and volume control pages)
     deck.playing.offset += geo.n_dynamic;
     if deck.playing.offset >= deck.playing.buttons.len() {
         deck.playing.offset = 0;
@@ -1095,6 +1099,57 @@ pub mod tests {
             harness.tap_button("Back").await?;
             harness.expect_navigation().await?;
             harness.expect_on_page_with_button(SOUND_BUTTON_LABEL).await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_control_page_rotate_functionality() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to sound page and start playing
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Verify we're on the volume control page
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+
+            // Test that rotate button exists and works - it should rotate the dynamic area (currently playing)
+            // The rotate button should have "Next" in its label on volume control page
+            let rotate_button = harness.find_button_by_label_prefix("Next").await
+                .ok_or_else(|| eyre::eyre!("Rotate button not found on volume control page"))?;
+
+            // Tap the rotate button - this should rotate the dynamic area (currently playing tracks)
+            harness.ui_event_tx.send(UiEvent::ButtonTap(rotate_button)).await?;
+            
+            // Should receive a navigation/refresh command (from display_top_page)
+            harness.expect_navigation().await?;
+
+            // Should still be on volume control page
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
 
             Ok(())
         })
