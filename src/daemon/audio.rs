@@ -50,6 +50,19 @@ impl Track {
             playback: guard.playback_state(),
         }
     }
+
+    #[cfg(test)]
+    pub async fn update_mock_state(&self, playback: PlaybackState) -> eyre::Result<()> {
+        use crate::daemon::ui::tests::harness::MockTrackState;
+        
+        let mut guard = self.state.lock().await;
+        let mock_state = guard
+            .as_any_mut()
+            .downcast_mut::<MockTrackState>()
+            .ok_or_else(|| eyre::eyre!("Expected MockTrackState in test"))?;
+        mock_state.playback = playback;
+        Ok(())
+    }
 }
 
 pub trait TrackState: Send {

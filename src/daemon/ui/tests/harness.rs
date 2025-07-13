@@ -109,6 +109,16 @@ impl TestHarness {
         Ok(())
     }
 
+    pub async fn hold_button(&mut self, label: &str) -> eyre::Result<()> {
+        let button = self
+            .find_button_by_label(label)
+            .await
+            .ok_or_else(|| eyre::eyre!("Button '{}' not found on current page", label))?;
+
+        self.ui_event_tx.send(UiEvent::ButtonHold(button)).await?;
+        Ok(())
+    }
+
     pub async fn expect_navigation(&mut self) -> eyre::Result<()> {
         let command = timeout(Duration::from_millis(100), self.ui_command_rx.recv())
             .await
@@ -146,6 +156,14 @@ impl TestHarness {
             .ok_or_else(|| eyre::eyre!("Audio command channel closed"))
     }
 
+    pub async fn expect_volume_command(&mut self) -> eyre::Result<f64> {
+        let command = self.expect_audio_command().await?;
+        match command {
+            AudioCommand::SetGlobalVolume(volume) => Ok(volume),
+            _ => Err(eyre::eyre!("Expected SetGlobalVolume command, got {:?}", command)),
+        }
+    }
+
     pub async fn expect_refresh(&mut self) -> eyre::Result<()> {
         let command = timeout(Duration::from_millis(100), self.ui_command_rx.recv())
             .await
@@ -170,34 +188,53 @@ impl TestHarness {
         .await
     }
 
-    pub async fn simulate_track_state_changed_with_playback(
-        &mut self,
-        sound_path: &str,
-        playback: PlaybackState,
-    ) -> eyre::Result<()> {
+    pub async fn simulate_unknown_track_state_changed(&mut self, sound_path: &str) -> eyre::Result<()> {
         use crate::daemon::audio::{AudioEvent, Track};
         use std::path::PathBuf;
 
-        let path_arc = self
-            .find_button_by_label(SOUND_BUTTON_LABEL)
-            .await
-            .and_then(|b| b.inner.track.as_ref().map(|t| t.path.clone()))
-            .unwrap_or_else(|| Arc::new(PathBuf::from(sound_path)));
-
+        // Create a new track (for testing unknown tracks)
         let track = Arc::new(Track::with_state(
-            path_arc,
+            Arc::new(PathBuf::from(sound_path)),
             PlaySoundSettings {
                 volume: 0.8,
                 mode: PlaybackMode::PlayStop,
                 fade_in: Some(Duration::from_millis(100)),
                 fade_out: Some(Duration::from_millis(100)),
             },
-            Box::new(MockTrackState { playback }),
+            Box::new(MockTrackState { playback: PlaybackState::Stopped }),
         ));
 
         self.audio_event_tx
             .send(AudioEvent::TrackStateChanged(track))
             .await?;
+        Ok(())
+    }
+
+    pub async fn simulate_track_state_changed_with_playback(
+        &mut self,
+        _sound_path: &str,
+        playback: PlaybackState,
+    ) -> eyre::Result<()> {
+        use crate::daemon::audio::AudioEvent;
+
+        // Find the existing track from the button
+        let button = self
+            .find_button_by_label(SOUND_BUTTON_LABEL)
+            .await
+            .ok_or_else(|| eyre::eyre!("Sound button not found"))?;
+
+        if let Some(track) = &button.inner.track {
+            // Update the existing track's state
+            track.update_mock_state(playback).await?;
+
+            // Send track state changed event
+            self.audio_event_tx
+                .send(AudioEvent::TrackStateChanged(track.clone()))
+                .await?;
+        } else {
+            return Err(eyre::eyre!("Sound button has no track"));
+        }
+
         Ok(())
     }
 
@@ -211,6 +248,28 @@ impl TestHarness {
             }
         }
         None
+    }
+
+    pub async fn find_button_by_label_prefix(&self, label_prefix: &str) -> Option<ButtonRef> {
+        for opt_btn in &self.current_buttons {
+            if let Some(btn) = opt_btn {
+                let button_data = btn.read().await;
+                if button_data.label.as_str().starts_with(label_prefix) {
+                    return Some(btn.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn expect_on_page_with_button_prefix(&self, label_prefix: &str) -> eyre::Result<()> {
+        if self.find_button_by_label_prefix(label_prefix).await.is_none() {
+            return Err(eyre::eyre!(
+                "Expected to be on page with button starting with '{}'",
+                label_prefix
+            ));
+        }
+        Ok(())
     }
 
     pub async fn button_notification(&self, label: &str) -> eyre::Result<Option<String>> {

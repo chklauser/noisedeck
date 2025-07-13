@@ -88,7 +88,18 @@ impl ButtonBuilder {
     }
 
     pub fn track(mut self, track_path: Arc<PathBuf>, settings: &PlaySoundSettings) -> Self {
-        self.inner.track = Some(Arc::new(Track::new(track_path, settings.clone())));
+        #[cfg(test)]
+        {
+            self.inner.track = Some(Arc::new(Track::with_state(
+                track_path,
+                settings.clone(),
+                Box::new(crate::daemon::ui::tests::harness::MockTrackState::default()),
+            )));
+        }
+        #[cfg(not(test))]
+        {
+            self.inner.track = Some(Arc::new(Track::new(track_path, settings.clone())));
+        }
         self
     }
 

@@ -728,7 +728,6 @@ impl NoiseDeck {
                     return Ok(());
                 }
             }
-            debug!("Button hold event received, but no handler set and not a playing track");
         }
         Ok(())
     }
@@ -739,8 +738,8 @@ use crate::util::IterExt;
 pub use iface::{UiCommand, UiEvent};
 
 #[cfg(test)]
-mod tests {
-    use super::UiCommand;
+pub mod tests {
+    use super::{UiCommand, UiEvent};
     use crate::daemon::audio::AudioCommand;
     use assert_matches::assert_matches;
     use harness::{BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL, with_test_harness};
@@ -748,7 +747,7 @@ mod tests {
     use tokio::time::timeout;
 
     // Test support code goes into the harness module. Actual tests go here.
-    mod harness;
+    pub mod harness;
 
     #[tokio::test]
     async fn test_back_button_navigation() -> eyre::Result<()> {
@@ -896,7 +895,7 @@ mod tests {
 
             // Simulate track state change for unknown track - should not trigger any UI commands
             harness
-                .simulate_track_state_changed("unknown_sound.mp3")
+                .simulate_unknown_track_state_changed("unknown_sound.mp3")
                 .await?;
 
             // Should not receive any UI commands
@@ -938,6 +937,177 @@ mod tests {
 
             let notif = harness.button_notification(SOUND_BUTTON_LABEL).await?;
             assert!(notif.is_some());
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_up_command() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to volume control page
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Now we should be on volume control page, tap volume up
+            let vol_up_button = harness.find_button_by_label_prefix("Vol +").await
+                .ok_or_else(|| eyre::eyre!("Volume up button not found"))?;
+
+            harness.ui_event_tx.send(UiEvent::ButtonTap(vol_up_button)).await?;
+            
+            // Should receive volume command
+            let volume = harness.expect_volume_command().await?;
+            assert_eq!(volume, 3.0); // Should increase from 0.0 to 3.0
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_down_command() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to volume control page
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Now we should be on volume control page, tap volume down
+            let vol_down_button = harness.find_button_by_label_prefix("Vol -").await
+                .ok_or_else(|| eyre::eyre!("Volume down button not found"))?;
+
+            harness.ui_event_tx.send(UiEvent::ButtonTap(vol_down_button)).await?;
+            
+            // Should receive volume command
+            let volume = harness.expect_volume_command().await?;
+            assert_eq!(volume, -3.0); // Should decrease from 0.0 to -3.0
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_long_press_playing_track_opens_volume_control() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to page with sound button
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            // Start playing the sound
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate the track being in playing state
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+
+            // Expect some UI update for the playing state
+            let command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+            assert_matches!(command.unwrap(), UiCommand::Refresh | UiCommand::Flip(_));
+
+            // Now test holding the sound button should open volume control
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            
+            // Should navigate to volume control page
+            harness.expect_navigation().await?;
+            
+            // Should be on a page with volume controls
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_control_page_layout() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to sound page and start playing
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Verify volume control page has expected buttons
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+            harness.expect_on_page_with_button("Back").await?;
+
+            // Test back button returns to previous page
+            harness.tap_button("Back").await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(SOUND_BUTTON_LABEL).await?;
 
             Ok(())
         })
