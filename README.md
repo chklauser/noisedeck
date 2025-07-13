@@ -9,3 +9,9 @@ At this stage, the software is not really ready for you to use. I'm dog-fooding 
 # Development Dependencies (systemd packages libuv)
 dnf install alsa-lib-devel systemd-devel
 ```
+
+### Ubuntu Linux
+```bash
+# Development Dependencies (systemd packages libuv)
+sudo apt install libasound2-dev libsystemd-dev
+```
