@@ -132,6 +132,7 @@ src/
 ## Environment Setup
 
 ### Environment Variables
+
 - Use `.env` file for development configuration
 - `RUST_LOG` for tracing level control
 - Check `dotenvy` integration in main.rs
@@ -164,6 +165,19 @@ src/
 - Where possible, prefer async closures `async |x| {}` over `|x| async move {}`
 
 ## Contribution Guidelines
+
+### Local Development Environment Setup
+### Fedora Linux
+```bash
+# Development Dependencies (systemd packages libuv)
+dnf install alsa-lib-devel systemd-devel
+```
+
+### Ubuntu Linux
+```bash
+# Development Dependencies (systemd packages libuv)
+sudo apt install libasound2-dev libsystemd-dev
+```
 
 ### Local Development Workflow
 - Implement your functionality, adding tests where appropriate.
