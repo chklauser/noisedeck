@@ -59,7 +59,8 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
 
     // tracks
     let view = deck.current_view()?;
-    let page = deck.get_library_category(&view.page_id.clone())?.to_vec();
+    let page_id = view.page_id().ok_or_else(|| eyre::eyre!("Cannot rotate view that has no page ID"))?;
+    let page = deck.get_library_category(&page_id)?.to_vec();
     let page_len = page.len();
     let view = deck.current_view()?;
     let (_, n_displayed) = deck.layout_page(&page, view);
@@ -100,6 +101,30 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus>
     })
 }
 
+async fn btn_volume_up(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    // Increase volume by 3 dB
+    deck.audio_command_tx
+        .send(AudioCommand::SetGlobalVolume(deck.current_volume_db + 3.0))
+        .await?;
+    Ok(BtnInvokeStatus::default())
+}
+
+async fn btn_volume_down(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    // Decrease volume by 3 dB
+    deck.audio_command_tx
+        .send(AudioCommand::SetGlobalVolume(deck.current_volume_db - 3.0))
+        .await?;
+    Ok(BtnInvokeStatus::default())
+}
+
+async fn btn_show_volume_control(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    deck.push_volume_control_page().await?;
+    Ok(BtnInvokeStatus {
+        skip_refresh: true, // push_volume_control_page() already sent UiCommand::Flip
+        ..BtnInvokeStatus::default()
+    })
+}
+
 async fn btn_play_stop(deck: &mut NoiseDeck, track: &Arc<Track>) -> eyre::Result<BtnInvokeStatus> {
     let state = track.read().await;
     let track = track.clone();
@@ -133,16 +158,45 @@ pub struct NoiseDeck {
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
     view_stack: Vec<View>,
     playing: PlayingView,
+    current_volume_db: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct View {
-    page_id: Uuid,
+    view_type: ViewType,
     offset: usize,
 }
+
+#[derive(Debug, Clone)]
+pub enum ViewType {
+    LibraryPage(Uuid),
+    VolumeControl,
+}
+
 impl View {
     pub fn new(page_id: Uuid) -> Self {
-        View { page_id, offset: 0 }
+        View { 
+            view_type: ViewType::LibraryPage(page_id),
+            offset: 0
+        }
+    }
+
+    pub fn new_volume_control() -> Self {
+        View {
+            view_type: ViewType::VolumeControl,
+            offset: 0
+        }
+    }
+
+    pub fn page_id(&self) -> Option<Uuid> {
+        match &self.view_type {
+            ViewType::LibraryPage(id) => Some(*id),
+            ViewType::VolumeControl => None,
+        }
+    }
+
+    pub fn is_volume_control(&self) -> bool {
+        matches!(self.view_type, ViewType::VolumeControl)
     }
 }
 
@@ -201,6 +255,12 @@ impl NoiseDeck {
         Ok(())
     }
 
+    pub(crate) async fn push_volume_control_page(&mut self) -> eyre::Result<()> {
+        self.view_stack.push(View::new_volume_control());
+        self.display_top_page().await?;
+        Ok(())
+    }
+
     pub fn new(
         kind: Kind,
         config: Arc<Config>,
@@ -227,6 +287,7 @@ impl NoiseDeck {
             library: HashMap::new(),
             tracks: HashMap::new(),
             playing: Default::default(),
+            current_volume_db: 0.0, // Start at 0 dB (no change)
         };
         (
             deck,
@@ -345,6 +406,101 @@ impl NoiseDeck {
         (page, n_selected_buttons)
     }
 
+    fn layout_volume_control_page(&self) -> Vec<Option<ButtonRef>> {
+        let mut page = Vec::with_capacity(self.kind.key_count().into());
+        
+        // Volume controls are in the first column (positions 0 and cols)
+        // Row 0: Volume Up
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: format!("Vol +\n{:.1} dB", self.current_volume_db).into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::VolumeUp)
+                .build()
+                .into(),
+        ));
+
+        // Fill the rest of the first row (columns 1 to cols-1) with empty buttons
+        for _ in 1..self.geo.cols {
+            page.push(None);
+        }
+
+        // If we have at least 2 rows, add volume down at position cols (start of second row)
+        if self.geo.rows >= 2 {
+            page.push(Some(
+                Button::builder()
+                    .data(ButtonData {
+                        label: format!("Vol -\n{:.1} dB", self.current_volume_db).into(),
+                        ..Default::default()
+                    })
+                    .on_tap(ButtonBehavior::VolumeDown)
+                    .build()
+                    .into(),
+            ));
+
+            // Fill the rest of the second row
+            for _ in 1..self.geo.cols {
+                page.push(None);
+            }
+        }
+
+        // Fill any remaining rows except the last one with empty buttons
+        let buttons_so_far = page.len();
+        let total_buttons_except_bottom_row = (self.geo.rows - 1) * self.geo.cols;
+        for _ in buttons_so_far..total_buttons_except_bottom_row {
+            page.push(None);
+        }
+
+        // Bottom row: Back button, dynamic playing buttons, and Next/rotate button
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Back".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Pop)
+                .on_hold(ButtonBehavior::Goto(self.config.start_page))
+                .build()
+                .into(),
+        ));
+
+        // Dynamic playing buttons (same as normal page layout)
+        let mut effective_n_dyn_buttons = 0usize;
+        for button in self.playing
+            .buttons
+            .iter()
+            .skip(self.playing.offset)
+            .chain(self.playing.buttons.iter().take(self.playing.offset))
+            .take(self.geo.n_dynamic)
+        {
+            page.push(Some(button.clone()));
+            effective_n_dyn_buttons += 1;
+        }
+
+        // Pad with None to fill n_dynamic slots
+        for _ in effective_n_dyn_buttons..self.geo.n_dynamic {
+            page.push(None);
+        }
+
+        // Next/rotate button
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Next\nVolume".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Rotate)
+                .on_hold(ButtonBehavior::ResetOffset)
+                .build()
+                .into(),
+        ));
+
+        debug_assert_eq!(page.len(), self.kind.key_count() as usize);
+        page
+    }
+
     #[inline]
     fn current_view(&self) -> eyre::Result<&View> {
         self.view_stack
@@ -360,10 +516,21 @@ impl NoiseDeck {
     }
 
     async fn display_top_page(&mut self) -> eyre::Result<()> {
-        let semantic_buttons = self
-            .get_library_category(&self.current_view()?.page_id.clone())?
-            .to_vec();
-        let (physical_buttons, _) = self.layout_page(&semantic_buttons, self.current_view()?);
+        let physical_buttons = {
+            let current_view = self.current_view()?.clone(); // Clone to avoid borrowing issues
+            match &current_view.view_type {
+                ViewType::LibraryPage(page_id) => {
+                    let page_id = *page_id; // Copy the page_id to avoid borrowing issues
+                    let semantic_buttons = self.get_library_category(&page_id)?.to_vec();
+                    let (physical_buttons, _) = self.layout_page(&semantic_buttons, &current_view);
+                    physical_buttons
+                }
+                ViewType::VolumeControl => {
+                    self.layout_volume_control_page()
+                }
+            }
+        };
+        
         self.ui_command_tx
             .send(UiCommand::Flip(physical_buttons))
             .await?;
@@ -459,6 +626,11 @@ impl NoiseDeck {
                                 warn!(error = %e, "Error handling button tap event");
                             }
                         }
+                        Some(AudioEvent::GlobalVolumeChanged(volume)) => {
+                            if let Err(e) = self.handle_global_volume_changed(volume).await {
+                                warn!(error = %e, "Error handling global volume change");
+                            }
+                        }
                         None => {
                             info!("Audio channel closed. I sure hope this is part of a shutdown sequence");
                         }
@@ -511,6 +683,14 @@ impl NoiseDeck {
     }
 
     #[tracing::instrument(skip(self), level = "trace")]
+    async fn handle_global_volume_changed(&mut self, volume: f64) -> eyre::Result<()> {
+        self.current_volume_db = volume;
+        // For now, global volume changes don't need UI updates
+        // Later we'll update volume control page if it's visible
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self), level = "trace")]
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
             let result = {
@@ -539,7 +719,16 @@ impl NoiseDeck {
             }
             self.ui_command_tx.send(UiCommand::Refresh).await?;
         } else {
-            debug!("Button tap event received, but no handler set");
+            // Check if this is a track button that is currently playing
+            if let Some(track) = &button.inner.track {
+                let track_state = track.read().await;
+                if track_state.playback.is_advancing() {
+                    // This is a playing track, open volume control
+                    self.push_volume_control_page().await?;
+                    return Ok(());
+                }
+            }
+            debug!("Button hold event received, but no handler set and not a playing track");
         }
         Ok(())
     }

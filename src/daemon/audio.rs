@@ -4,7 +4,7 @@ use eyre::Context;
 use kira::effect::volume_control::VolumeControlHandle;
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};
 use kira::sound::{FromFileError, PlaybackState};
-use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Easing, Tween};
+use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Easing, Tween};
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,12 +105,15 @@ impl<T: TrackState + ?Sized> From<&T> for TrackStateData {
 
 pub enum AudioEvent {
     TrackStateChanged(Arc<Track>),
+    GlobalVolumeChanged(f64),
 }
 
 #[derive(Debug)]
 pub enum AudioCommand {
     Play(Arc<Track>),
     Stop(Arc<Track>),
+    SetGlobalVolume(f64),
+    GetGlobalVolume,
 }
 
 pub enum BlockingAudioCommand {
@@ -123,6 +126,7 @@ struct AudioState {
     tracks: Vec<Arc<Track>>,
     event_tx: Sender<AudioEvent>,
     global_volume: VolumeControlHandle,
+    current_volume_db: f64,
 }
 impl AudioState {
     pub fn new(event_tx: Sender<AudioEvent>) -> eyre::Result<Self> {
@@ -137,7 +141,27 @@ impl AudioState {
             global_volume,
             tracks: Vec::new(),
             event_tx,
+            current_volume_db: 0.0, // Start at 0 dB (no change)
         })
+    }
+
+    #[instrument(skip_all, level = "debug")]
+    fn set_global_volume(&mut self, volume_db: f64) -> eyre::Result<()> {
+        self.global_volume.set_volume(
+            Decibels(volume_db as f32),
+            Tween::default(),
+        );
+        self.current_volume_db = volume_db;
+        self.event_tx.blocking_send(AudioEvent::GlobalVolumeChanged(volume_db))?;
+        Ok(())
+    }
+
+    #[instrument(skip_all, level = "debug")]
+    fn get_global_volume(&mut self) -> eyre::Result<f64> {
+        // Return the current tracked volume
+        let volume_db = self.current_volume_db;
+        self.event_tx.blocking_send(AudioEvent::GlobalVolumeChanged(volume_db))?;
+        Ok(volume_db)
     }
 
     #[instrument(skip_all, level = "debug")]
@@ -271,6 +295,16 @@ fn run_sync(
 
                 state.tracks.retain(|t| !Arc::ptr_eq(&track, t));
                 update_track_state(track, &state.event_tx)?
+            }
+            AsyncCommand(AudioCommand::SetGlobalVolume(volume_db)) => {
+                if let Err(e) = state.set_global_volume(volume_db) {
+                    error!("Error setting global volume: {:?}", e);
+                }
+            }
+            AsyncCommand(AudioCommand::GetGlobalVolume) => {
+                if let Err(e) = state.get_global_volume() {
+                    error!("Error getting global volume: {:?}", e);
+                }
             }
             BlockingAudioCommand::UpdateState => {
                 let mut idx_to_remove = Vec::new();
