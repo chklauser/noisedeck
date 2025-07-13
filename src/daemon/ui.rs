@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 use std::default::Default;
 use std::iter::repeat;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -105,18 +105,22 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus>
     })
 }
 
+const VOLUME_DELTA_DB: f64 = 3.0;
+
 async fn btn_volume_up(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     // Increase volume by 3 dB
+    deck.volume.set_global_db(deck.volume.global_db + VOLUME_DELTA_DB).await;
     deck.audio_command_tx
-        .send(AudioCommand::SetGlobalVolume(deck.global_volume_db + 3.0))
+        .send(AudioCommand::SetGlobalVolume(deck.volume.global_db))
         .await?;
     Ok(BtnInvokeStatus::default())
 }
 
 async fn btn_volume_down(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     // Decrease volume by 3 dB
+    deck.volume.set_global_db(deck.volume.global_db - VOLUME_DELTA_DB).await;
     deck.audio_command_tx
-        .send(AudioCommand::SetGlobalVolume(deck.global_volume_db - 3.0))
+        .send(AudioCommand::SetGlobalVolume(deck.volume.global_db))
         .await?;
     Ok(BtnInvokeStatus::default())
 }
@@ -162,7 +166,34 @@ pub struct NoiseDeck {
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
     view_stack: Vec<View>,
     playing: PlayingView,
-    global_volume_db: f64,
+    volume: VolumeControls,
+}
+
+struct VolumeControls {
+    global_db: f64,
+    global_up: ButtonRef,
+    global_down: ButtonRef,
+}
+
+impl VolumeControls {
+    fn new() -> Self {
+        VolumeControls {
+            global_db: 0.0,
+            global_up: Button::builder().data(ButtonData{label: "Vol +".to_string().into(), ..Default::default()}).on_tap(ButtonBehavior::VolumeUp).build().into(),
+            global_down: Button::builder().data(ButtonData{label: "Vol -".to_string().into(), ..Default::default()}).on_tap(ButtonBehavior::VolumeDown).build().into()
+        }
+    }
+
+    async fn set_global_db(&mut self, global_db: f64) {
+        self.global_db = global_db;
+        let notif = format!("{global_db:0} dB");
+        write_notification(self.global_up.clone(), notif.clone()).await;
+        write_notification(self.global_down.clone(), notif).await;
+        async fn write_notification(btn: ButtonRef, notif: String) {
+            let mut data = btn.inner.data.write().await;
+            data.notification = Some(notif);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +284,9 @@ impl From<Kind> for Geometry {
     }
 }
 
+static VOLUME_UP_LABEL : LazyLock<Arc<String>> = LazyLock::new(|| { Arc::new("Vol +".to_string()) });
+static VOLUME_DOWN_LABEL : LazyLock<Arc<String>> = LazyLock::new(|| { Arc::new("Vol -".to_string()) });
+
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
         self.ui_command_tx.send(UiCommand::Flip(buttons)).await?;
@@ -291,7 +325,7 @@ impl NoiseDeck {
             library: HashMap::new(),
             tracks: HashMap::new(),
             playing: Default::default(),
-            global_volume_db: 0.0, // Start at 0 dB (no change)
+            volume: VolumeControls::new(),
         };
         (
             deck,
@@ -415,16 +449,7 @@ impl NoiseDeck {
         
         // Volume controls are in the first column (positions 0 and cols)
         // Row 0: Volume Up
-        page.push(Some(
-            Button::builder()
-                .data(ButtonData {
-                    label: format!("Vol +\n{:.1} dB", self.global_volume_db).into(),
-                    ..Default::default()
-                })
-                .on_tap(ButtonBehavior::VolumeUp)
-                .build()
-                .into(),
-        ));
+        page.push(Some(self.volume.global_up.clone()));
 
         // Fill the rest of the first row (columns 1 to cols-1) with empty buttons
         for _ in 1..self.geo.cols {
@@ -433,16 +458,7 @@ impl NoiseDeck {
 
         // If we have at least 2 rows, add volume down at position cols (start of second row)
         if self.geo.rows >= 2 {
-            page.push(Some(
-                Button::builder()
-                    .data(ButtonData {
-                        label: format!("Vol -\n{:.1} dB", self.global_volume_db).into(),
-                        ..Default::default()
-                    })
-                    .on_tap(ButtonBehavior::VolumeDown)
-                    .build()
-                    .into(),
-            ));
+            page.push(Some(self.volume.global_down.clone()));
 
             // Fill the rest of the second row
             for _ in 1..self.geo.cols {
@@ -492,7 +508,7 @@ impl NoiseDeck {
         page.push(Some(
             Button::builder()
                 .data(ButtonData {
-                    label: "Next\nVolume".to_string().into(),
+                    label: "Next\n(Vol)".to_string().into(),
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::Rotate)
@@ -685,9 +701,8 @@ impl NoiseDeck {
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
             let result = {
-                let mut button_guard = button.inner.data.write().await;
                 on_tap
-                    .invoke(self, &button.inner, &mut button_guard)
+                    .invoke(self, &button.inner)
                     .await?
             };
             if !result.skip_refresh {
@@ -703,9 +718,8 @@ impl NoiseDeck {
     async fn handle_button_hold(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_hold) = button.inner.on_hold.as_ref() {
             {
-                let mut button_guard = button.inner.data.write().await;
                 on_hold
-                    .invoke(self, &button.inner, &mut button_guard)
+                    .invoke(self, &button.inner)
                     .await?;
             }
             self.ui_command_tx.send(UiCommand::Refresh).await?;

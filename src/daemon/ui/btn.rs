@@ -48,7 +48,6 @@ impl ButtonBehavior {
         &self,
         deck: &mut NoiseDeck,
         button: &Button,
-        _data: &mut ButtonData,
     ) -> eyre::Result<BtnInvokeStatus> {
         match self {
             ButtonBehavior::Pop => btn_pop(deck).await,
