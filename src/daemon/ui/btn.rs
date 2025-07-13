@@ -2,7 +2,7 @@ use crate::config::PlaySoundSettings;
 use crate::daemon::audio::Track;
 use crate::daemon::ui::{
     BtnInvokeStatus, ButtonData, NoiseDeck, btn_goto, btn_play_stop, btn_pop, btn_push,
-    btn_reset_offset, btn_rotate,
+    btn_reset_offset, btn_rotate, btn_volume_up, btn_volume_down, btn_show_volume_control,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
@@ -39,13 +39,15 @@ pub(in crate::daemon::ui) enum ButtonBehavior {
     Goto(Uuid),
     Rotate,
     ResetOffset,
+    VolumeUp,
+    VolumeDown,
+    ShowVolumeControl,
 }
 impl ButtonBehavior {
     pub(in crate::daemon::ui) async fn invoke(
         &self,
         deck: &mut NoiseDeck,
         button: &Button,
-        _data: &mut ButtonData,
     ) -> eyre::Result<BtnInvokeStatus> {
         match self {
             ButtonBehavior::Pop => btn_pop(deck).await,
@@ -61,6 +63,9 @@ impl ButtonBehavior {
             }
             ButtonBehavior::Rotate => btn_rotate(deck).await,
             ButtonBehavior::ResetOffset => btn_reset_offset(deck).await,
+            ButtonBehavior::VolumeUp => btn_volume_up(deck).await,
+            ButtonBehavior::VolumeDown => btn_volume_down(deck).await,
+            ButtonBehavior::ShowVolumeControl => btn_show_volume_control(deck).await,
         }
     }
 }
@@ -82,7 +87,18 @@ impl ButtonBuilder {
     }
 
     pub fn track(mut self, track_path: Arc<PathBuf>, settings: &PlaySoundSettings) -> Self {
-        self.inner.track = Some(Arc::new(Track::new(track_path, settings.clone())));
+        #[cfg(test)]
+        {
+            self.inner.track = Some(Arc::new(Track::with_state(
+                track_path,
+                settings.clone(),
+                Box::new(crate::daemon::ui::tests::harness::MockTrackState::default()),
+            )));
+        }
+        #[cfg(not(test))]
+        {
+            self.inner.track = Some(Arc::new(Track::new(track_path, settings.clone())));
+        }
         self
     }
 

@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 use std::default::Default;
 use std::iter::repeat;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -57,19 +57,24 @@ async fn btn_goto(deck: &mut NoiseDeck, id: Uuid) -> eyre::Result<BtnInvokeStatu
 async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     let geo = deck.geo;
 
-    // tracks
+    // For library pages, rotate both content and dynamic areas
+    // For volume control pages, only rotate the dynamic area
     let view = deck.current_view()?;
-    let page = deck.get_library_category(&view.page_id.clone())?.to_vec();
-    let page_len = page.len();
-    let view = deck.current_view()?;
-    let (_, n_displayed) = deck.layout_page(&page, view);
-    let view = deck.current_view_mut()?;
-    view.offset += geo.n_content.max(n_displayed);
-    if view.offset >= page_len {
-        view.offset = 0;
+    if !view.is_volume_control() {
+        // tracks (library page content)
+        let page_id = view.page_id().ok_or_else(|| eyre::eyre!("Cannot rotate view that has no page ID"))?;
+        let page = deck.get_library_category(&page_id)?.to_vec();
+        let page_len = page.len();
+        let view = deck.current_view()?;
+        let (_, n_displayed) = deck.layout_page(&page, view);
+        let view = deck.current_view_mut()?;
+        view.offset += geo.n_content.max(n_displayed);
+        if view.offset >= page_len {
+            view.offset = 0;
+        }
     }
 
-    // playing
+    // playing (dynamic area - always rotate for both library and volume control pages)
     deck.playing.offset += geo.n_dynamic;
     if deck.playing.offset >= deck.playing.buttons.len() {
         deck.playing.offset = 0;
@@ -96,6 +101,34 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus>
 
     Ok(BtnInvokeStatus {
         skip_refresh: true, // display_top_page() already sent UiCommand::Flip
+        ..BtnInvokeStatus::default()
+    })
+}
+
+const VOLUME_DELTA_DB: f64 = 3.0;
+
+async fn btn_volume_up(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    // Increase volume by 3 dB
+    deck.volume.set_global_db(deck.volume.global_db + VOLUME_DELTA_DB).await;
+    deck.audio_command_tx
+        .send(AudioCommand::SetGlobalVolume(deck.volume.global_db))
+        .await?;
+    Ok(BtnInvokeStatus::default())
+}
+
+async fn btn_volume_down(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    // Decrease volume by 3 dB
+    deck.volume.set_global_db(deck.volume.global_db - VOLUME_DELTA_DB).await;
+    deck.audio_command_tx
+        .send(AudioCommand::SetGlobalVolume(deck.volume.global_db))
+        .await?;
+    Ok(BtnInvokeStatus::default())
+}
+
+async fn btn_show_volume_control(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
+    deck.push_volume_control_page().await?;
+    Ok(BtnInvokeStatus {
+        skip_refresh: true, // push_volume_control_page() already sent UiCommand::Flip
         ..BtnInvokeStatus::default()
     })
 }
@@ -133,16 +166,72 @@ pub struct NoiseDeck {
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
     view_stack: Vec<View>,
     playing: PlayingView,
+    volume: VolumeControls,
 }
 
-#[derive(Debug)]
+struct VolumeControls {
+    global_db: f64,
+    global_up: ButtonRef,
+    global_down: ButtonRef,
+}
+
+impl VolumeControls {
+    fn new() -> Self {
+        VolumeControls {
+            global_db: 0.0,
+            global_up: Button::builder().data(ButtonData{label: "Vol +".to_string().into(), ..Default::default()}).on_tap(ButtonBehavior::VolumeUp).build().into(),
+            global_down: Button::builder().data(ButtonData{label: "Vol -".to_string().into(), ..Default::default()}).on_tap(ButtonBehavior::VolumeDown).build().into()
+        }
+    }
+
+    async fn set_global_db(&mut self, global_db: f64) {
+        self.global_db = global_db;
+        let notif = format!("{global_db:0} dB");
+        write_notification(self.global_up.clone(), notif.clone()).await;
+        write_notification(self.global_down.clone(), notif).await;
+        async fn write_notification(btn: ButtonRef, notif: String) {
+            let mut data = btn.inner.data.write().await;
+            data.notification = Some(notif);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct View {
-    page_id: Uuid,
+    view_type: ViewType,
     offset: usize,
 }
+
+#[derive(Debug, Clone)]
+pub enum ViewType {
+    LibraryPage(Uuid),
+    VolumeControl,
+}
+
 impl View {
     pub fn new(page_id: Uuid) -> Self {
-        View { page_id, offset: 0 }
+        View { 
+            view_type: ViewType::LibraryPage(page_id),
+            offset: 0
+        }
+    }
+
+    pub fn new_volume_control() -> Self {
+        View {
+            view_type: ViewType::VolumeControl,
+            offset: 0
+        }
+    }
+
+    pub fn page_id(&self) -> Option<Uuid> {
+        match &self.view_type {
+            ViewType::LibraryPage(id) => Some(*id),
+            ViewType::VolumeControl => None,
+        }
+    }
+
+    pub fn is_volume_control(&self) -> bool {
+        matches!(self.view_type, ViewType::VolumeControl)
     }
 }
 
@@ -195,9 +284,18 @@ impl From<Kind> for Geometry {
     }
 }
 
+static VOLUME_UP_LABEL : LazyLock<Arc<String>> = LazyLock::new(|| { Arc::new("Vol +".to_string()) });
+static VOLUME_DOWN_LABEL : LazyLock<Arc<String>> = LazyLock::new(|| { Arc::new("Vol -".to_string()) });
+
 impl NoiseDeck {
     pub(crate) async fn push_page(&mut self, buttons: Vec<Option<ButtonRef>>) -> eyre::Result<()> {
         self.ui_command_tx.send(UiCommand::Flip(buttons)).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn push_volume_control_page(&mut self) -> eyre::Result<()> {
+        self.view_stack.push(View::new_volume_control());
+        self.display_top_page().await?;
         Ok(())
     }
 
@@ -227,6 +325,7 @@ impl NoiseDeck {
             library: HashMap::new(),
             tracks: HashMap::new(),
             playing: Default::default(),
+            volume: VolumeControls::new(),
         };
         (
             deck,
@@ -345,6 +444,83 @@ impl NoiseDeck {
         (page, n_selected_buttons)
     }
 
+    fn layout_volume_control_page(&self) -> Vec<Option<ButtonRef>> {
+        let mut page = Vec::with_capacity(self.kind.key_count().into());
+        
+        // Volume controls are in the first column (positions 0 and cols)
+        // Row 0: Volume Up
+        page.push(Some(self.volume.global_up.clone()));
+
+        // Fill the rest of the first row (columns 1 to cols-1) with empty buttons
+        for _ in 1..self.geo.cols {
+            page.push(None);
+        }
+
+        // If we have at least 2 rows, add volume down at position cols (start of second row)
+        if self.geo.rows >= 2 {
+            page.push(Some(self.volume.global_down.clone()));
+
+            // Fill the rest of the second row
+            for _ in 1..self.geo.cols {
+                page.push(None);
+            }
+        }
+
+        // Fill any remaining rows except the last one with empty buttons
+        let buttons_so_far = page.len();
+        let total_buttons_except_bottom_row = (self.geo.rows - 1) * self.geo.cols;
+        for _ in buttons_so_far..total_buttons_except_bottom_row {
+            page.push(None);
+        }
+
+        // Bottom row: Back button, dynamic playing buttons, and Next/rotate button
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Back".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Pop)
+                .on_hold(ButtonBehavior::Goto(self.config.start_page))
+                .build()
+                .into(),
+        ));
+
+        // Dynamic playing buttons (same as normal page layout)
+        let mut effective_n_dyn_buttons = 0usize;
+        for button in self.playing
+            .buttons
+            .iter()
+            .skip(self.playing.offset)
+            .chain(self.playing.buttons.iter().take(self.playing.offset))
+            .take(self.geo.n_dynamic)
+        {
+            page.push(Some(button.clone()));
+            effective_n_dyn_buttons += 1;
+        }
+
+        // Pad with None to fill n_dynamic slots
+        for _ in effective_n_dyn_buttons..self.geo.n_dynamic {
+            page.push(None);
+        }
+
+        // Next/rotate button
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Next\n(Vol)".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Rotate)
+                .on_hold(ButtonBehavior::ResetOffset)
+                .build()
+                .into(),
+        ));
+
+        debug_assert_eq!(page.len(), self.kind.key_count() as usize);
+        page
+    }
+
     #[inline]
     fn current_view(&self) -> eyre::Result<&View> {
         self.view_stack
@@ -360,10 +536,21 @@ impl NoiseDeck {
     }
 
     async fn display_top_page(&mut self) -> eyre::Result<()> {
-        let semantic_buttons = self
-            .get_library_category(&self.current_view()?.page_id.clone())?
-            .to_vec();
-        let (physical_buttons, _) = self.layout_page(&semantic_buttons, self.current_view()?);
+        let physical_buttons = {
+            let view_type = self.current_view()?.view_type.clone();
+            match view_type {
+                ViewType::LibraryPage(page_id) => {
+                    let semantic_buttons = self.get_library_category(&page_id)?.to_vec();
+                    let current_view = self.current_view()?;
+                    let (physical_buttons, _) = self.layout_page(&semantic_buttons, current_view);
+                    physical_buttons
+                }
+                ViewType::VolumeControl => {
+                    self.layout_volume_control_page()
+                }
+            }
+        };
+        
         self.ui_command_tx
             .send(UiCommand::Flip(physical_buttons))
             .await?;
@@ -514,9 +701,8 @@ impl NoiseDeck {
     async fn handle_button_tap(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_tap) = button.inner.on_tap.as_ref() {
             let result = {
-                let mut button_guard = button.inner.data.write().await;
                 on_tap
-                    .invoke(self, &button.inner, &mut button_guard)
+                    .invoke(self, &button.inner)
                     .await?
             };
             if !result.skip_refresh {
@@ -532,14 +718,21 @@ impl NoiseDeck {
     async fn handle_button_hold(&mut self, button: &ButtonRef) -> eyre::Result<()> {
         if let Some(on_hold) = button.inner.on_hold.as_ref() {
             {
-                let mut button_guard = button.inner.data.write().await;
                 on_hold
-                    .invoke(self, &button.inner, &mut button_guard)
+                    .invoke(self, &button.inner)
                     .await?;
             }
             self.ui_command_tx.send(UiCommand::Refresh).await?;
         } else {
-            debug!("Button tap event received, but no handler set");
+            // Check if this is a track button that is currently playing
+            if let Some(track) = &button.inner.track {
+                let track_state = track.read().await;
+                if track_state.playback.is_advancing() {
+                    // This is a playing track, open volume control
+                    self.push_volume_control_page().await?;
+                    return Ok(());
+                }
+            }
         }
         Ok(())
     }
@@ -550,8 +743,8 @@ use crate::util::IterExt;
 pub use iface::{UiCommand, UiEvent};
 
 #[cfg(test)]
-mod tests {
-    use super::UiCommand;
+pub mod tests {
+    use super::{UiCommand, UiEvent};
     use crate::daemon::audio::AudioCommand;
     use assert_matches::assert_matches;
     use harness::{BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL, with_test_harness};
@@ -559,7 +752,7 @@ mod tests {
     use tokio::time::timeout;
 
     // Test support code goes into the harness module. Actual tests go here.
-    mod harness;
+    pub mod harness;
 
     #[tokio::test]
     async fn test_back_button_navigation() -> eyre::Result<()> {
@@ -707,7 +900,7 @@ mod tests {
 
             // Simulate track state change for unknown track - should not trigger any UI commands
             harness
-                .simulate_track_state_changed("unknown_sound.mp3")
+                .simulate_unknown_track_state_changed("unknown_sound.mp3")
                 .await?;
 
             // Should not receive any UI commands
@@ -749,6 +942,228 @@ mod tests {
 
             let notif = harness.button_notification(SOUND_BUTTON_LABEL).await?;
             assert!(notif.is_some());
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_up_command() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to volume control page
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Now we should be on volume control page, tap volume up
+            let vol_up_button = harness.find_button_by_label_prefix("Vol +").await
+                .ok_or_else(|| eyre::eyre!("Volume up button not found"))?;
+
+            harness.ui_event_tx.send(UiEvent::ButtonTap(vol_up_button)).await?;
+            
+            // Should receive volume command
+            let volume = harness.expect_volume_command().await?;
+            assert_eq!(volume, 3.0); // Should increase from 0.0 to 3.0
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_down_command() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to volume control page
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Now we should be on volume control page, tap volume down
+            let vol_down_button = harness.find_button_by_label_prefix("Vol -").await
+                .ok_or_else(|| eyre::eyre!("Volume down button not found"))?;
+
+            harness.ui_event_tx.send(UiEvent::ButtonTap(vol_down_button)).await?;
+            
+            // Should receive volume command
+            let volume = harness.expect_volume_command().await?;
+            assert_eq!(volume, -3.0); // Should decrease from 0.0 to -3.0
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_long_press_playing_track_opens_volume_control() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to page with sound button
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness
+                .expect_on_page_with_button(SOUND_BUTTON_LABEL)
+                .await?;
+
+            // Start playing the sound
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate the track being in playing state
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+
+            // Expect some UI update for the playing state
+            let command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+            assert_matches!(command.unwrap(), UiCommand::Refresh | UiCommand::Flip(_));
+
+            // Now test holding the sound button should open volume control
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            
+            // Should navigate to volume control page
+            harness.expect_navigation().await?;
+            
+            // Should be on a page with volume controls
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_control_page_layout() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to sound page and start playing
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Verify volume control page has expected buttons
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+            harness.expect_on_page_with_button("Back").await?;
+
+            // Test back button returns to previous page
+            harness.tap_button("Back").await?;
+            harness.expect_navigation().await?;
+            harness.expect_on_page_with_button(SOUND_BUTTON_LABEL).await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_volume_control_page_rotate_functionality() -> eyre::Result<()> {
+        with_test_harness(async |harness| {
+            // Navigate to sound page and start playing
+            harness.tap_button(NAV_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+            harness.tap_button(SOUND_BUTTON_LABEL).await?;
+            let audio_cmd = harness.expect_audio_command().await?;
+            assert_matches!(audio_cmd, AudioCommand::Play(_));
+            harness.expect_refresh().await?;
+
+            // Simulate playing state and hold to open volume control
+            harness
+                .simulate_track_state_changed_with_playback(
+                    "test_sound.mp3",
+                    kira::sound::PlaybackState::Playing,
+                )
+                .await?;
+            
+            // Clear the playing state update
+            let _command = timeout(Duration::from_millis(100), harness.ui_command_rx.recv())
+                .await
+                .expect("Should receive UI command");
+
+            harness.hold_button(SOUND_BUTTON_LABEL).await?;
+            harness.expect_navigation().await?;
+
+            // Verify we're on the volume control page
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
+
+            // Test that rotate button exists and works - it should rotate the dynamic area (currently playing)
+            // The rotate button should have "Next" in its label on volume control page
+            let rotate_button = harness.find_button_by_label_prefix("Next").await
+                .ok_or_else(|| eyre::eyre!("Rotate button not found on volume control page"))?;
+
+            // Tap the rotate button - this should rotate the dynamic area (currently playing tracks)
+            harness.ui_event_tx.send(UiEvent::ButtonTap(rotate_button)).await?;
+            
+            // Should receive a navigation/refresh command (from display_top_page)
+            harness.expect_navigation().await?;
+
+            // Should still be on volume control page
+            harness.expect_on_page_with_button_prefix("Vol +").await?;
+            harness.expect_on_page_with_button_prefix("Vol -").await?;
 
             Ok(())
         })
