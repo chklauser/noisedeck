@@ -104,7 +104,7 @@ async fn btn_reset_offset(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus>
 async fn btn_volume_up(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     // Increase volume by 3 dB
     deck.audio_command_tx
-        .send(AudioCommand::SetGlobalVolume(deck.current_volume_db + 3.0))
+        .send(AudioCommand::SetGlobalVolume(deck.global_volume_db + 3.0))
         .await?;
     Ok(BtnInvokeStatus::default())
 }
@@ -112,7 +112,7 @@ async fn btn_volume_up(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
 async fn btn_volume_down(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
     // Decrease volume by 3 dB
     deck.audio_command_tx
-        .send(AudioCommand::SetGlobalVolume(deck.current_volume_db - 3.0))
+        .send(AudioCommand::SetGlobalVolume(deck.global_volume_db - 3.0))
         .await?;
     Ok(BtnInvokeStatus::default())
 }
@@ -158,7 +158,7 @@ pub struct NoiseDeck {
     tracks: HashMap<Arc<PathBuf>, ButtonRef>,
     view_stack: Vec<View>,
     playing: PlayingView,
-    current_volume_db: f64,
+    global_volume_db: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -287,7 +287,7 @@ impl NoiseDeck {
             library: HashMap::new(),
             tracks: HashMap::new(),
             playing: Default::default(),
-            current_volume_db: 0.0, // Start at 0 dB (no change)
+            global_volume_db: 0.0, // Start at 0 dB (no change)
         };
         (
             deck,
@@ -414,7 +414,7 @@ impl NoiseDeck {
         page.push(Some(
             Button::builder()
                 .data(ButtonData {
-                    label: format!("Vol +\n{:.1} dB", self.current_volume_db).into(),
+                    label: format!("Vol +\n{:.1} dB", self.global_volume_db).into(),
                     ..Default::default()
                 })
                 .on_tap(ButtonBehavior::VolumeUp)
@@ -432,7 +432,7 @@ impl NoiseDeck {
             page.push(Some(
                 Button::builder()
                     .data(ButtonData {
-                        label: format!("Vol -\n{:.1} dB", self.current_volume_db).into(),
+                        label: format!("Vol -\n{:.1} dB", self.global_volume_db).into(),
                         ..Default::default()
                     })
                     .on_tap(ButtonBehavior::VolumeDown)
@@ -517,12 +517,12 @@ impl NoiseDeck {
 
     async fn display_top_page(&mut self) -> eyre::Result<()> {
         let physical_buttons = {
-            let current_view = self.current_view()?.clone(); // Clone to avoid borrowing issues
-            match &current_view.view_type {
+            let view_type = self.current_view()?.view_type.clone();
+            match view_type {
                 ViewType::LibraryPage(page_id) => {
-                    let page_id = *page_id; // Copy the page_id to avoid borrowing issues
                     let semantic_buttons = self.get_library_category(&page_id)?.to_vec();
-                    let (physical_buttons, _) = self.layout_page(&semantic_buttons, &current_view);
+                    let current_view = self.current_view()?;
+                    let (physical_buttons, _) = self.layout_page(&semantic_buttons, current_view);
                     physical_buttons
                 }
                 ViewType::VolumeControl => {
@@ -626,11 +626,6 @@ impl NoiseDeck {
                                 warn!(error = %e, "Error handling button tap event");
                             }
                         }
-                        Some(AudioEvent::GlobalVolumeChanged(volume)) => {
-                            if let Err(e) = self.handle_global_volume_changed(volume).await {
-                                warn!(error = %e, "Error handling global volume change");
-                            }
-                        }
                         None => {
                             info!("Audio channel closed. I sure hope this is part of a shutdown sequence");
                         }
@@ -679,14 +674,6 @@ impl NoiseDeck {
         if refresh_needed {
             self.ui_command_tx.send(UiCommand::Refresh).await?;
         }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self), level = "trace")]
-    async fn handle_global_volume_changed(&mut self, volume: f64) -> eyre::Result<()> {
-        self.current_volume_db = volume;
-        // For now, global volume changes don't need UI updates
-        // Later we'll update volume control page if it's visible
         Ok(())
     }
 
