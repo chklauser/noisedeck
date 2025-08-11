@@ -3,8 +3,8 @@ use crate::config::Config;
 use crate::daemon::audio::{AudioCommand, AudioEvent, Track};
 use crate::daemon::ui::btn::{Button, ButtonBehavior};
 use elgato_streamdeck::info::Kind;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::default::Default;
 use std::iter::repeat;
 use std::path::PathBuf;
@@ -76,7 +76,7 @@ async fn btn_rotate(deck: &mut NoiseDeck) -> eyre::Result<BtnInvokeStatus> {
 
     // playing (dynamic area - always rotate for both library and volume control pages)
     deck.playing.offset += geo.n_dynamic;
-    if deck.playing.offset >= deck.playing.buttons.len() {
+    if deck.playing.offset >= deck.playing.currently_playing.len() {
         deck.playing.offset = 0;
     }
 
@@ -237,23 +237,39 @@ impl View {
 
 #[derive(Debug, Default)]
 pub struct PlayingView {
-    buttons: Vec<ButtonRef>,
+    currently_playing: Vec<ButtonRef>,
+    recently_played: Vec<ButtonRef>,
     offset: usize,
 }
 
 impl PlayingView {
     /// Updates the playing list and indicates whether there was a change.
     pub fn update_playing(&mut self, button: &ButtonRef, playing: bool) -> bool {
-        let currently_in_playing = self.buttons.contains(button);
-        if playing && !currently_in_playing {
-            self.buttons.push(button.clone());
-            true
-        } else if !playing && currently_in_playing {
-            self.buttons.retain(|b| button != b);
-            true
-        } else {
-            false
+        let currently_in_playing = self.currently_playing.contains(button);
+        let recently_played = self.recently_played.contains(button);
+        let mut view_changed = false;
+
+        if recently_played {
+            self.recently_played.retain(|b| button != b);
+            view_changed = true;
         }
+
+        if playing && !currently_in_playing {
+            self.currently_playing.push(button.clone());
+            view_changed = true;
+        } else if !playing {
+            self.recently_played.insert(0, button.clone());
+            if self.recently_played.len() > 9 {
+                self.recently_played.remove(self.recently_played.len() - 1);
+            }
+
+            if currently_in_playing {
+                self.currently_playing.retain(|b| button != b);
+                view_changed = true;
+            }
+        }
+
+        view_changed
     }
 }
 
@@ -359,46 +375,22 @@ impl NoiseDeck {
         );
 
         // Back
-        page.push(Some(
-            Button::builder()
-                .data(ButtonData {
-                    label: "Back".to_string().into(),
-                    ..Default::default()
-                })
-                .on_tap(ButtonBehavior::Pop)
-                .on_hold(ButtonBehavior::Goto(self.config.start_page))
-                .build()
-                .into(),
-        ));
+        self.layout_back_btn(&mut page);
 
         // Dynamic
-        let mut effective_n_dyn_buttons = 0usize;
-        page.extend(
-            self.playing
-                .buttons
+        let effective_n_dyn_buttons = self.layout_dyn_section(
+            &mut page,
+            |b: &&ButtonRef| {
+                !semantic_buttons
+                    .iter()
+                    .skip(view.offset)
+                    .take(n_selected_buttons)
+                    .any(|sb| sb == *b)
+            },
+            semantic_buttons
                 .iter()
-                // skip is resilient against out of bounds offsets
-                .skip(self.playing.offset)
-                .chain(self.playing.buttons.iter().take(self.playing.offset))
-                .filter(|b| {
-                    !semantic_buttons
-                        .iter()
-                        .skip(view.offset)
-                        .take(n_selected_buttons)
-                        .any(|sb| sb == *b)
-                })
-                .take(self.geo.n_dynamic)
-                .pad_alt_cnt(
-                    self.geo.n_dynamic,
-                    semantic_buttons
-                        .iter()
-                        .skip(view.offset + n_selected_buttons)
-                        .filter(|b| !self.playing.buttons.contains(b)),
-                    &mut effective_n_dyn_buttons,
-                )
-                .map(|b| Some(b.clone()))
-                .pad(self.geo.n_dynamic, None),
-        );
+                .skip(view.offset + n_selected_buttons)
+                .filter(|b| !self.playing.currently_playing.contains(b)));
         n_selected_buttons += self
             .geo
             .n_dynamic
@@ -444,6 +436,47 @@ impl NoiseDeck {
         (page, n_selected_buttons)
     }
 
+    fn layout_back_btn(&self, page: &mut Vec<Option<ButtonRef>>) {
+        page.push(Some(
+            Button::builder()
+                .data(ButtonData {
+                    label: "Back".to_string().into(),
+                    ..Default::default()
+                })
+                .on_tap(ButtonBehavior::Pop)
+                .on_hold(ButtonBehavior::Goto(self.config.start_page))
+                .build()
+                .into(),
+        ));
+    }
+
+    /// Returns the effective number of dynamic buttons appended to the page.
+    /// Also pads the dynamic section. Any additional, page-specific buttons need to be passed in
+    /// `overflow_buttons`.
+    fn layout_dyn_section<'a>(&'a self, page: &'a mut Vec<Option<ButtonRef>>, omit_from_dyn_section: impl (Fn(&&ButtonRef) -> bool) + Clone, overflow_buttons: impl Iterator<Item=&'a ButtonRef>) -> usize {
+        let mut effective_n_dyn_buttons = 0usize;
+        page.extend(
+            self.playing
+                .currently_playing
+                .iter()
+                // skip is resilient against out of bounds offsets
+                .skip(self.playing.offset)
+                .chain(self.playing.currently_playing.iter().take(self.playing.offset))
+                .filter(omit_from_dyn_section.clone())
+                .take(self.geo.n_dynamic)
+                .pad_alt_cnt(self.geo.n_dynamic, self.playing.recently_played.iter().skip(self.playing.offset).chain(self.playing.currently_playing.iter().take(self.playing.offset))
+                    .filter(&omit_from_dyn_section), &mut 0)
+                .pad_alt_cnt(
+                    self.geo.n_dynamic,
+                    overflow_buttons,
+                    &mut effective_n_dyn_buttons,
+                )
+                .map(|b| Some(b.clone()))
+                .pad(self.geo.n_dynamic, None),
+        );
+        effective_n_dyn_buttons
+    }
+
     fn layout_volume_control_page(&self) -> Vec<Option<ButtonRef>> {
         let mut page = Vec::with_capacity(self.kind.key_count().into());
         
@@ -474,35 +507,10 @@ impl NoiseDeck {
         }
 
         // Bottom row: Back button, dynamic playing buttons, and Next/rotate button
-        page.push(Some(
-            Button::builder()
-                .data(ButtonData {
-                    label: "Back".to_string().into(),
-                    ..Default::default()
-                })
-                .on_tap(ButtonBehavior::Pop)
-                .on_hold(ButtonBehavior::Goto(self.config.start_page))
-                .build()
-                .into(),
-        ));
+        self.layout_back_btn(&mut page);
 
         // Dynamic playing buttons (same as normal page layout)
-        let mut effective_n_dyn_buttons = 0usize;
-        for button in self.playing
-            .buttons
-            .iter()
-            .skip(self.playing.offset)
-            .chain(self.playing.buttons.iter().take(self.playing.offset))
-            .take(self.geo.n_dynamic)
-        {
-            page.push(Some(button.clone()));
-            effective_n_dyn_buttons += 1;
-        }
-
-        // Pad with None to fill n_dynamic slots
-        for _ in effective_n_dyn_buttons..self.geo.n_dynamic {
-            page.push(None);
-        }
+        self.layout_dyn_section(&mut page, |_|true, [].iter());
 
         // Next/rotate button
         page.push(Some(
@@ -747,7 +755,7 @@ pub mod tests {
     use super::{UiCommand, UiEvent};
     use crate::daemon::audio::AudioCommand;
     use assert_matches::assert_matches;
-    use harness::{BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL, with_test_harness};
+    use harness::{with_test_harness, BACK_BUTTON_LABEL, NAV_BUTTON_LABEL, SOUND_BUTTON_LABEL};
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -799,7 +807,7 @@ pub mod tests {
             harness.tap_button(SOUND_BUTTON_LABEL).await?;
 
             let audio_command = harness.expect_audio_command().await?;
-            assert_matches!(audio_command, crate::daemon::audio::AudioCommand::Play(_));
+            assert_matches!(audio_command, AudioCommand::Play(_));
             harness.expect_refresh().await?;
 
             Ok(())
