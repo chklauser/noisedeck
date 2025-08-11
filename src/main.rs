@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code,mismatched_lifetime_syntaxes)]
 
 use crate::daemon::DaemonArgs;
 use crate::import::ImportArgs;
